@@ -29,4 +29,4 @@ task7:
   horizon: 4
   start_date: "2026-04-01"
   hiring_budget_per_step: 4
-  total_hiring_budget: 12
+  total_hiring_budget: 16

@@ -87,48 +87,22 @@ def _baseline_dashboard() -> DashboardState:
     )
 
 
-def _label_sampling_weights(hidden_goal: HiddenGoal) -> dict[FeedbackLabel, float]:
-    if hidden_goal.archetype.value == "growth":
-        return {
-            FeedbackLabel.FEATURE_REQUEST: 2.2,
-            FeedbackLabel.PRAISE: 1.5,
-            FeedbackLabel.CHURN_RISK: 1.0,
-            FeedbackLabel.BILLING_ISSUE: 0.8,
-            FeedbackLabel.BUG: 0.9,
-            FeedbackLabel.LATENCY_COMPLAINT: 0.8,
-        }
-    if hidden_goal.archetype.value == "retention":
-        return {
-            FeedbackLabel.CHURN_RISK: 2.5,
-            FeedbackLabel.BUG: 1.2,
-            FeedbackLabel.LATENCY_COMPLAINT: 1.3,
-            FeedbackLabel.BILLING_ISSUE: 0.8,
-            FeedbackLabel.FEATURE_REQUEST: 0.9,
-            FeedbackLabel.PRAISE: 0.7,
-        }
-    if hidden_goal.archetype.value == "revenue":
-        return {
-            FeedbackLabel.BILLING_ISSUE: 2.4,
-            FeedbackLabel.CHURN_RISK: 1.2,
-            FeedbackLabel.FEATURE_REQUEST: 1.0,
-            FeedbackLabel.PRAISE: 0.7,
-            FeedbackLabel.BUG: 0.8,
-            FeedbackLabel.LATENCY_COMPLAINT: 0.7,
-        }
+def _label_sampling_weights() -> dict[FeedbackLabel, float]:
+    """Keep inbox composition roughly stable across latent objectives."""
     return {
-        FeedbackLabel.BUG: 1.9,
-        FeedbackLabel.LATENCY_COMPLAINT: 2.0,
+        FeedbackLabel.BUG: 1.05,
+        FeedbackLabel.FEATURE_REQUEST: 1.0,
         FeedbackLabel.CHURN_RISK: 1.1,
-        FeedbackLabel.BILLING_ISSUE: 0.9,
-        FeedbackLabel.FEATURE_REQUEST: 0.8,
-        FeedbackLabel.PRAISE: 0.7,
+        FeedbackLabel.PRAISE: 0.9,
+        FeedbackLabel.BILLING_ISSUE: 1.0,
+        FeedbackLabel.LATENCY_COMPLAINT: 0.95,
     }
 
 
 def build_task1_episode(rng: random.Random, hidden_goal: HiddenGoal, item_count: int, world: dict) -> dict:
     """Create a deterministic feedback triage episode."""
     labels = list(TEMPLATES.keys())
-    label_weights = _label_sampling_weights(hidden_goal)
+    label_weights = _label_sampling_weights()
     inbox: list[InboxItem] = []
     true_labels: dict[str, FeedbackLabel] = {}
     true_priorities: dict[str, int] = {}

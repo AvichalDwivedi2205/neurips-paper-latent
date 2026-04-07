@@ -23,6 +23,76 @@ def _beneficiary_segments(kind: str) -> list[str]:
     return ["smb", "enterprise", "strategic"]
 
 
+def _capital_state_signals(accounts: list[CustomerAccount], market_context, dashboard: DashboardState) -> dict[str, float]:
+    commercial_accounts = [
+        account for account in accounts if account.segment in {"mid_market", "enterprise", "strategic"}
+    ] or list(accounts)
+    near_renewal_accounts = [account for account in commercial_accounts if account.renewal_window_days <= 35]
+    renewal_pressure = len(near_renewal_accounts) / max(len(commercial_accounts), 1)
+    trust_gap = sum(max(0.0, 0.68 - account.relationship_health) for account in commercial_accounts) / max(
+        len(commercial_accounts),
+        1,
+    )
+    expansion_pressure = sum(account.expansion_potential for account in commercial_accounts) / max(
+        len(commercial_accounts),
+        1,
+    )
+    support_stress = max(0.0, min(1.0, (dashboard.support_ticket_volume - 118.0) / 120.0))
+    margin_gap = max(0.0, min(1.0, (market_context.gross_margin_target - dashboard.ops_margin) / 0.24))
+    runway_tightness = max(0.0, min(1.0, (11.0 - float(market_context.cash_runway_months)) / 7.0))
+    pipeline_slack = max(0.0, min(1.0, (0.60 - market_context.sales_pipeline_health) / 0.35))
+    return {
+        "renewal_pressure": renewal_pressure,
+        "trust_gap": trust_gap,
+        "expansion_pressure": expansion_pressure,
+        "support_stress": support_stress,
+        "margin_gap": margin_gap,
+        "runway_tightness": runway_tightness,
+        "pipeline_slack": pipeline_slack,
+    }
+
+
+def _capital_context_note(kind: str, signals: dict[str, float]) -> str:
+    if kind == "growth":
+        if signals["pipeline_slack"] >= 0.30 and signals["support_stress"] < 0.35:
+            return "pipeline coverage feels softer than leadership wants and support load is still manageable"
+        if signals["support_stress"] >= 0.40:
+            return "support strain is already visible, so activation bets need operational cover to pay back cleanly"
+        return "new demand needs to compound into healthier activation rather than a noisy acquisition spike"
+    if kind == "retention":
+        if signals["renewal_pressure"] >= 0.30 or signals["trust_gap"] >= 0.20:
+            return "renewal risk and trust recovery are visible in the room"
+        return "leadership is sensitive to whether coverage and trust can hold through the next renewal cycle"
+    if kind == "revenue":
+        if signals["expansion_pressure"] >= 0.45:
+            return "there are credible expansion-ready accounts if commercial friction gets removed"
+        if signals["trust_gap"] >= 0.20:
+            return "commercial upside exists, but it only pays back if trust is not already wobbling"
+        return "pricing and packaging work needs visible expansion potential to justify the spend"
+    if signals["margin_gap"] >= 0.20 or signals["runway_tightness"] >= 0.20:
+        return "margin and runway pressure are becoming hard to ignore"
+    return "operating leverage matters because leadership wants cleaner execution and lower cost-to-serve"
+
+
+def _capital_impact_summary(kind: str, signals: dict[str, float]) -> str:
+    labels = {
+        "growth": "new-logo momentum",
+        "retention": "account stability",
+        "revenue": "commercial capture",
+        "efficiency": "operating leverage",
+    }
+    tradeoff = {
+        "growth": "operating leverage",
+        "retention": "new-logo momentum",
+        "revenue": "account stability",
+        "efficiency": "new-logo momentum",
+    }[kind]
+    return (
+        f"Best for {labels[kind]} when {_capital_context_note(kind, signals)}. "
+        f"Visible trade-offs on {tradeoff} if the portfolio gets too scattered."
+    )
+
+
 def _dashboard_baseline() -> DashboardState:
     return DashboardState(
         dau=25500.0,
@@ -238,7 +308,12 @@ def _stakeholder_note(
     return f"{persona.name} ({persona.role}) {role_prefix.get(persona.role, 'wants a focused allocation plan.')} {overlay}"
 
 
-def _build_programs(rng: random.Random, accounts: list[CustomerAccount], split: str) -> list[InitiativeItem]:
+def _build_programs(
+    rng: random.Random,
+    accounts: list[CustomerAccount],
+    split: str,
+    state_signals: dict[str, float],
+) -> list[InitiativeItem]:
     items: list[InitiativeItem] = []
     for raw in _program_bank(split):
         candidate_accounts = [
@@ -251,6 +326,7 @@ def _build_programs(rng: random.Random, accounts: list[CustomerAccount], split: 
         risk_notes = [
             f"Capital can be deployed in 1-point increments up to {raw['allocation_max']:.0f}.",
             f"Visible returns look strongest through about {raw['saturation_point']:.0f} points before tapering.",
+            _capital_context_note(str(raw["kind"]), state_signals).capitalize() + ".",
         ]
         if raw["requires"]:
             risk_notes.append("Part of the upside depends on another visible program being funded alongside it.")
@@ -286,6 +362,7 @@ def _build_programs(rng: random.Random, accounts: list[CustomerAccount], split: 
                 allocation_unit=1.0,
                 allocation_max=float(raw["allocation_max"]),
                 saturation_point=float(raw["saturation_point"]),
+                impact_summary=_capital_impact_summary(str(raw["kind"]), state_signals),
             )
         )
     return items
@@ -361,12 +438,33 @@ def _allocation_value(
     return max(0.0, score - risk_penalty - conflict_penalty - spread_penalty + focus_bonus)
 
 
+def _stakeholder_salience(persona: StakeholderPersona, state_signals: dict[str, float]) -> float:
+    by_role = {
+        "CEO": 1.5 + max(
+            state_signals["renewal_pressure"],
+            state_signals["expansion_pressure"],
+            state_signals["margin_gap"],
+            state_signals["runway_tightness"],
+        ),
+        "CFO": 1.2 + 1.5 * state_signals["margin_gap"] + 1.4 * state_signals["runway_tightness"],
+        "CTO": 1.1 + 1.2 * state_signals["support_stress"] + 1.0 * state_signals["margin_gap"],
+        "Head of CS": 1.1 + 1.5 * state_signals["renewal_pressure"] + 1.3 * state_signals["trust_gap"],
+        "Growth Lead": 1.1 + 1.5 * state_signals["pipeline_slack"] + 0.6 * state_signals["expansion_pressure"],
+    }
+    return (
+        by_role.get(persona.role, 1.0)
+        + persona.political_power * 0.5
+        + persona.credibility * 0.4
+    )
+
+
 def solve_oracle_allocations(
     backlog: list[InitiativeItem],
     budget: int,
     weights: dict[str, float],
     hidden_goal: HiddenGoal | None = None,
     company_profile=None,
+    step_index: int = 0,
 ) -> tuple[dict[str, float], float]:
     """Exhaustive integer search over visible allocation programs."""
     best_allocations: dict[str, float] = {}
@@ -376,7 +474,7 @@ def solve_oracle_allocations(
     def search(index: int, remaining: int, current: dict[str, float]) -> None:
         nonlocal best_allocations, best_value
         if index >= len(backlog):
-            value = _allocation_value(current, backlog, weights, hidden_goal, company_profile)
+            value = _allocation_value(current, backlog, weights, hidden_goal, company_profile, step_index)
             if value > best_value:
                 best_value = value
                 best_allocations = {key: float(value) for key, value in current.items() if value > 0.0}
@@ -403,6 +501,7 @@ def random_baseline_value(
     weights: dict[str, float],
     hidden_goal: HiddenGoal | None = None,
     company_profile=None,
+    step_index: int = 0,
     samples: int = 160,
 ) -> float:
     """Estimate a reproducible random-allocation baseline."""
@@ -420,7 +519,7 @@ def random_baseline_value(
             if amount > 0:
                 allocations[item.item_id] = float(amount)
                 remaining -= amount
-        values.append(_allocation_value(allocations, backlog, weights, hidden_goal, company_profile))
+        values.append(_allocation_value(allocations, backlog, weights, hidden_goal, company_profile, step_index))
     return sum(values) / max(len(values), 1)
 
 
@@ -434,7 +533,9 @@ def build_task4_episode(
     """Create the capital-allocation episode."""
     accounts: list[CustomerAccount] = world["accounts"]
     stakeholders: list[StakeholderPersona] = world["stakeholders"]
-    backlog = _build_programs(rng, accounts, split)
+    dashboard = _dashboard_baseline()
+    state_signals = _capital_state_signals(accounts, world["market_context"], dashboard)
+    backlog = _build_programs(rng, accounts, split, state_signals)
     oracle_allocations, oracle_value = solve_oracle_allocations(
         backlog,
         budget,
@@ -450,15 +551,10 @@ def build_task4_episode(
         hidden_goal,
         world["company_profile"],
     )
-    role_priority = {
-        "growth": {"Growth Lead": 0, "CEO": 1, "CTO": 2, "CFO": 3, "Head of CS": 4},
-        "retention": {"Head of CS": 0, "CEO": 1, "CFO": 2, "CTO": 3, "Growth Lead": 4},
-        "revenue": {"CFO": 0, "CEO": 1, "Growth Lead": 2, "Head of CS": 3, "CTO": 4},
-        "efficiency": {"CTO": 0, "CFO": 1, "CEO": 2, "Head of CS": 3, "Growth Lead": 4},
-    }[hidden_goal.archetype.value]
     visible_stakeholders = sorted(
         stakeholders[:4],
-        key=lambda persona: role_priority.get(persona.role, 10),
+        key=lambda persona: _stakeholder_salience(persona, state_signals),
+        reverse=True,
     )
     stakeholder_notes = [
         _stakeholder_note(persona, accounts, world["market_context"])
@@ -467,7 +563,7 @@ def build_task4_episode(
     return {
         "company_profile": world["company_profile"],
         "hidden_goal": hidden_goal,
-        "dashboard": _dashboard_baseline(),
+        "dashboard": dashboard,
         "backlog": backlog,
         "accounts": accounts[:6],
         "stakeholders": visible_stakeholders,
@@ -476,6 +572,7 @@ def build_task4_episode(
         "governance_constraints": world["governance_constraints"],
         "sprint_budget": float(budget),
         "stakeholder_notes": stakeholder_notes,
+        "state_signals": state_signals,
         "oracle_allocations": oracle_allocations,
         "oracle_value": oracle_value,
         "random_value": random_value,

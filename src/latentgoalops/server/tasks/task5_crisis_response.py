@@ -166,16 +166,22 @@ def _select_focus_account(accounts: list[CustomerAccount]) -> CustomerAccount:
     )
 
 
-def _select_exec_sender(rng: random.Random, stakeholders, hidden_goal: HiddenGoal) -> str:
+def _select_exec_sender(rng: random.Random, stakeholders, accounts: list[CustomerAccount], market_context, dashboard: DashboardState) -> str:
+    renewal_pressure = sum(1 for account in accounts if account.renewal_window_days <= 30) / max(len(accounts), 1)
+    trust_gap = sum(max(0.0, 0.66 - account.relationship_health) for account in accounts) / max(len(accounts), 1)
+    support_stress = max(0.0, min(1.0, (dashboard.support_ticket_volume - 150.0) / 120.0))
+    margin_gap = max(0.0, min(1.0, (market_context.gross_margin_target - dashboard.ops_margin) / 0.24))
+    runway_tightness = max(0.0, min(1.0, (11.0 - float(market_context.cash_runway_months)) / 7.0))
+    growth_pressure = max(0.0, 0.60 - float(market_context.sales_pipeline_health))
     role_weights = {
-        "growth": {"Growth Lead": 3.2, "CEO": 2.0, "CFO": 1.1, "Head of CS": 1.0, "CTO": 1.0},
-        "retention": {"Head of CS": 3.5, "CEO": 2.0, "CFO": 1.1, "CTO": 1.1, "Growth Lead": 1.0},
-        "revenue": {"CFO": 3.1, "CEO": 2.3, "Growth Lead": 1.2, "Head of CS": 1.0, "CTO": 1.0},
-        "efficiency": {"CTO": 3.0, "CFO": 2.2, "CEO": 2.0, "Head of CS": 1.0, "Growth Lead": 1.0},
+        "CEO": 1.5 + max(renewal_pressure, support_stress, runway_tightness, growth_pressure),
+        "CFO": 1.2 + 1.4 * float(market_context.board_pressure_level) + 1.2 * runway_tightness + 1.0 * margin_gap,
+        "CTO": 1.1 + 1.3 * support_stress + 1.1 * margin_gap,
+        "Head of CS": 1.1 + 1.5 * renewal_pressure + 1.4 * trust_gap,
+        "Growth Lead": 1.1 + 1.4 * growth_pressure + 0.4 * float(market_context.competition_intensity),
     }
-    weights_by_role = role_weights.get(hidden_goal.archetype.value, {})
     weights = [
-        weights_by_role.get(stakeholder.role, 1.0)
+        role_weights.get(stakeholder.role, 1.0)
         + stakeholder.political_power * 0.5
         + stakeholder.credibility * 0.4
         + rng.uniform(0.0, 0.8)
@@ -208,7 +214,6 @@ def _exec_message(role: str, signal_lines: list[str], market_context, dashboard:
 
 def _build_inbox(
     rng: random.Random,
-    hidden_goal: HiddenGoal,
     stakeholders,
     accounts: list[CustomerAccount],
     market_context,
@@ -225,7 +230,7 @@ def _build_inbox(
     )[:2]
     signal_lines = _pressure_lines(accounts, market_context, dashboard)
     focus_account = _select_focus_account(accounts)
-    exec_sender = _select_exec_sender(rng, stakeholders, hidden_goal)
+    exec_sender = _select_exec_sender(rng, stakeholders, accounts, market_context, dashboard)
     items = [
         InboxItem(
             item_id="crisis_msg_0",
@@ -384,10 +389,14 @@ def evaluate_task5_action_value(
     channel_support: dict[str, float] = {}
     for item in chosen_items:
         channel_support[item.kind] = channel_support.get(item.kind, 0.0) + 1.0
-    if action.messaging_action is not None and action.messaging_action != MessagingAction.NONE:
-        channel_support[action.messaging_action.value.split("_")[0]] = channel_support.get(
-            action.messaging_action.value.split("_")[0], 0.0
-        ) + 0.5
+    message_channel = {
+        MessagingAction.GROWTH_PUSH: "growth",
+        MessagingAction.RETENTION_CAMPAIGN: "retention",
+        MessagingAction.REVENUE_UPSELL: "revenue",
+        MessagingAction.COST_COMMS: "efficiency",
+    }.get(action.messaging_action)
+    if message_channel is not None:
+        channel_support[message_channel] = channel_support.get(message_channel, 0.0) + 0.5
     if action.support_policy == SupportPolicy.PREMIUM_SLA:
         channel_support["retention"] = channel_support.get("retention", 0.0) + 0.4
     elif action.support_policy == SupportPolicy.AUTOMATION_FIRST:
@@ -492,7 +501,7 @@ def build_task5_episode(
     dashboard = _initial_dashboard()
     backlog = _load_response_initiatives(accounts, rng, split)
     narrative = _narrative(accounts, market_context, dashboard)
-    inbox = _build_inbox(rng, hidden_goal, stakeholders, accounts, market_context, dashboard)
+    inbox = _build_inbox(rng, stakeholders, accounts, market_context, dashboard)
     episode = {
         "task_id": TaskId.TASK5,
         "company_profile": world["company_profile"].model_copy(deep=True),

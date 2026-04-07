@@ -63,20 +63,36 @@ def _pressure_inventory(accounts: list[CustomerAccount], market_context) -> dict
 def _ordered_stakeholders(
     rng: random.Random,
     stakeholders: list[StakeholderPersona],
-    hidden_goal: HiddenGoal,
+    accounts: list[CustomerAccount],
+    market_context,
 ) -> list[StakeholderPersona]:
+    near_renewal_ratio = (
+        sum(1 for account in accounts if account.renewal_window_days <= 30) / max(len(accounts), 1)
+    )
+    relationship_risk = (
+        sum(max(0.0, 0.66 - account.relationship_health) for account in accounts) / max(len(accounts), 1)
+    )
+    expansion_pressure = (
+        sum(account.expansion_potential for account in accounts) / max(len(accounts), 1)
+    )
+    runway_tightness = max(0.0, min(1.0, (12.0 - float(market_context.cash_runway_months)) / 8.0))
+    board_pressure = max(0.0, min(1.0, float(market_context.board_pressure_level)))
+    growth_pressure = max(0.0, 0.62 - float(market_context.sales_pipeline_health)) + 0.5 * float(
+        market_context.competition_intensity
+    )
+
     role_weights = {
-        "growth": {"Growth Lead": 3.4, "CEO": 2.2, "CFO": 1.2, "CTO": 1.0, "Head of CS": 1.0},
-        "retention": {"Head of CS": 3.6, "CEO": 2.1, "CFO": 1.1, "CTO": 1.1, "Growth Lead": 1.0},
-        "revenue": {"CFO": 3.2, "CEO": 2.4, "Growth Lead": 1.2, "Head of CS": 1.0, "CTO": 1.0},
-        "efficiency": {"CTO": 3.0, "CFO": 2.3, "CEO": 2.0, "Head of CS": 1.1, "Growth Lead": 1.0},
+        "CEO": 1.6 + max(near_renewal_ratio, expansion_pressure, growth_pressure, runway_tightness),
+        "CFO": 1.2 + 1.4 * board_pressure + 1.3 * runway_tightness,
+        "CTO": 1.1 + 0.8 * runway_tightness + 0.6 * relationship_risk,
+        "Head of CS": 1.1 + 1.5 * near_renewal_ratio + 1.2 * relationship_risk,
+        "Growth Lead": 1.1 + 1.5 * growth_pressure + 0.5 * expansion_pressure,
     }
     remaining = stakeholders[:]
     ordered: list[StakeholderPersona] = []
-    weights_by_role = role_weights.get(hidden_goal.archetype.value, {})
     while remaining:
         weights = [
-            weights_by_role.get(stakeholder.role, 1.0)
+            role_weights.get(stakeholder.role, 1.0)
             + stakeholder.political_power * 0.6
             + stakeholder.credibility * 0.4
             + rng.uniform(0.0, 0.8)
@@ -207,10 +223,10 @@ def _item_prefix(item_id: str) -> str:
 
 def _channel_labels() -> dict[str, str]:
     return {
-        "growth": "activation and demand",
-        "retention": "renewal stability and trust",
-        "revenue": "monetization and expansion",
-        "efficiency": "cost-to-serve and delivery discipline",
+        "growth": "new-logo momentum",
+        "retention": "account stability",
+        "revenue": "commercial capture",
+        "efficiency": "operating leverage",
     }
 
 
@@ -218,6 +234,7 @@ def _task2_impact_summary(
     item: InitiativeItem,
     family_size: int,
     accounts_by_id: dict[str, CustomerAccount],
+    backlog_by_id: dict[str, InitiativeItem],
 ) -> str:
     labels = _channel_labels()
     positives = [
@@ -252,6 +269,27 @@ def _task2_impact_summary(
         )
     if linked_accounts:
         summary_parts.append("Most visible account exposure: " + ", ".join(linked_accounts) + ".")
+    prerequisite_titles = [
+        backlog_by_id[item_id].title
+        for item_id in item.requires_item_ids
+        if item_id in backlog_by_id
+    ][:2]
+    if prerequisite_titles:
+        summary_parts.append("Visible prerequisite: " + ", ".join(prerequisite_titles) + ".")
+    synergy_titles = [
+        backlog_by_id[item_id].title
+        for item_id in item.synergy_item_ids
+        if item_id in backlog_by_id
+    ][:2]
+    if synergy_titles:
+        summary_parts.append("Combines visibly well with " + ", ".join(synergy_titles) + ".")
+    conflict_titles = [
+        backlog_by_id[item_id].title
+        for item_id in item.conflicts_with_ids
+        if item_id in backlog_by_id
+    ][:1]
+    if conflict_titles:
+        summary_parts.append("Avoid pairing with " + ", ".join(conflict_titles) + ".")
     if family_size > 1:
         summary_parts.append("Alternative execution path in the same initiative family; usually choose at most one variant.")
     return " ".join(summary_parts)
@@ -282,6 +320,7 @@ def _attach_bundle_structure(backlog: list[InitiativeItem], accounts_by_id: dict
     by_prefix: dict[str, list[InitiativeItem]] = {}
     for item in backlog:
         by_prefix.setdefault(_item_prefix(item.item_id), []).append(item)
+    backlog_by_id = {item.item_id: item for item in backlog}
 
     def first(prefix: str) -> InitiativeItem | None:
         candidates = by_prefix.get(prefix, [])
@@ -333,18 +372,27 @@ def _attach_bundle_structure(backlog: list[InitiativeItem], accounts_by_id: dict
             risk_notes.append("Operational efficiency wins can backfire if service expectations are already fragile.")
         if item.requires_item_ids:
             risk_notes.append("A visible prerequisite is missing if this ships in isolation.")
+        if item.synergy_item_ids:
+            visible_partners = [
+                backlog_by_id[item_id].title
+                for item_id in item.synergy_item_ids
+                if item_id in backlog_by_id
+            ][:2]
+            if visible_partners:
+                risk_notes.append("Best as part of a fuller portfolio with " + ", ".join(visible_partners) + ".")
         if item.conflicts_with_ids:
             risk_notes.append("This portfolio can create mixed signals if paired with a conflicting initiative.")
         family_size = len(by_prefix.get(_item_prefix(item.item_id), []))
         if family_size > 1:
             risk_notes.append("Alternative execution path in the same initiative family; choose at most one variant.")
         item.risk_notes = risk_notes
-        item.impact_summary = _task2_impact_summary(item, family_size, accounts_by_id)
+        item.impact_summary = _task2_impact_summary(item, family_size, accounts_by_id, backlog_by_id)
 
 
 def _bundle_value(
     selected_item_ids: list[str],
     backlog: list[InitiativeItem],
+    budget_limit: int,
     weights: dict[str, float],
     hidden_goal: HiddenGoal | None = None,
     company_profile=None,
@@ -355,6 +403,9 @@ def _bundle_value(
         return 0.0
 
     score = 0.0
+    spent_budget = sum(int(round(item.cost)) for item in chosen.values())
+    synergy_bonus = 0.0
+    dependency_coverage = 0
     for item in chosen.values():
         base = _initiative_value(item.kpi_deltas, weights)
         if hidden_goal is not None:
@@ -366,12 +417,20 @@ def _bundle_value(
             )
         if item.requires_item_ids and not any(required in chosen for required in item.requires_item_ids):
             base *= 0.55
+        elif item.requires_item_ids:
+            dependency_coverage += 1
         if item.synergy_item_ids and any(synergy in chosen for synergy in item.synergy_item_ids):
             base *= 1.12
         score += base
 
     conflict_penalty = 0.0
     for item in chosen.values():
+        for synergy_id in item.synergy_item_ids:
+            if synergy_id in chosen and item.item_id < synergy_id:
+                synergy_bonus += 0.08 * min(
+                    _initiative_value(item.kpi_deltas, weights),
+                    _initiative_value(chosen[synergy_id].kpi_deltas, weights),
+                )
         for conflict_id in item.conflicts_with_ids:
             if conflict_id in chosen and item.item_id < conflict_id:
                 conflict_penalty += 0.18 * min(
@@ -381,7 +440,29 @@ def _bundle_value(
 
     execution_penalty = sum(item.implementation_risk * 0.03 for item in chosen.values())
     concentration_bonus = 0.02 * max(0, len({item.kind for item in chosen.values()}) == 1)
-    return max(0.0, score - conflict_penalty - execution_penalty + concentration_bonus)
+    spend_ratio = spent_budget / max(float(budget_limit), 1.0)
+    completion_bonus = 0.0
+    if len(chosen) >= 4 and spend_ratio >= 0.72:
+        completion_bonus += 0.05
+    if dependency_coverage > 0:
+        completion_bonus += 0.02 * min(dependency_coverage, 2)
+    underbuild_penalty = 0.0
+    if len(chosen) <= 3 and spend_ratio < 0.65:
+        underbuild_penalty += 0.10
+    if len(chosen) <= 2:
+        underbuild_penalty += 0.04
+    if spend_ratio < 0.50:
+        underbuild_penalty += 0.04
+    return max(
+        0.0,
+        score
+        + synergy_bonus
+        - conflict_penalty
+        - execution_penalty
+        + concentration_bonus
+        + completion_bonus
+        - underbuild_penalty,
+    )
 
 
 def solve_oracle_selection(
@@ -400,7 +481,7 @@ def solve_oracle_selection(
             if cost > budget:
                 continue
             selected_ids = [item.item_id for item in subset]
-            value = _bundle_value(selected_ids, backlog, weights, hidden_goal, company_profile)
+            value = _bundle_value(selected_ids, backlog, budget, weights, hidden_goal, company_profile)
             if value > best_value:
                 best_value = value
                 best_selection = selected_ids
@@ -428,7 +509,7 @@ def random_baseline_value(
             if cost <= remaining and rng.random() > 0.45:
                 remaining -= cost
                 selected_ids.append(item.item_id)
-        values.append(_bundle_value(selected_ids, backlog, weights, hidden_goal, company_profile))
+        values.append(_bundle_value(selected_ids, backlog, budget, weights, hidden_goal, company_profile))
     return sum(values) / max(len(values), 1)
 
 
@@ -463,7 +544,7 @@ def build_task2_episode(
         world["company_profile"],
     )
 
-    ordered_stakeholders = _ordered_stakeholders(rng, stakeholders, hidden_goal)
+    ordered_stakeholders = _ordered_stakeholders(rng, stakeholders, accounts, world["market_context"])
     visible_stakeholders = ordered_stakeholders[:4]
     stakeholder_notes = [
         _stakeholder_note(persona, accounts, world["market_context"])
@@ -496,10 +577,11 @@ def build_task2_episode(
 def selection_value(
     selected_item_ids: list[str],
     backlog: list[InitiativeItem],
+    budget: int,
     weights: dict[str, float],
     hidden_goal: HiddenGoal | None = None,
     company_profile=None,
     step_index: int = 0,
 ) -> float:
     """Score an agent selection under the hidden utility weights."""
-    return _bundle_value(selected_item_ids, backlog, weights, hidden_goal, company_profile, step_index)
+    return _bundle_value(selected_item_ids, backlog, budget, weights, hidden_goal, company_profile, step_index)

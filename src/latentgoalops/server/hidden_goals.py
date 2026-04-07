@@ -279,6 +279,21 @@ def active_state(hidden_goal: HiddenGoal, step_index: int) -> LatentObjectiveSta
     return shifted
 
 
+def snapshot_hidden_goal(hidden_goal: HiddenGoal, step_index: int) -> HiddenGoal:
+    """Freeze the active latent state at one step into a shift-free HiddenGoal."""
+    state = active_state(hidden_goal, step_index)
+    return HiddenGoal(
+        archetype=state.archetype,
+        weights=dict(state.weights),
+        alpha=hidden_goal.alpha,
+        primary_kpi=state.primary_kpi,
+        risk_posture=state.risk_posture,
+        planning_horizon=state.planning_horizon,
+        segment_focus=state.segment_focus,
+        governance_strictness=state.governance_strictness,
+    )
+
+
 def channel_weight(hidden_goal: HiddenGoal, channel: str, step_index: int = 0) -> float:
     """Return channel weight for a hidden goal."""
     return float(active_state(hidden_goal, step_index).weights.get(channel, 0.0))

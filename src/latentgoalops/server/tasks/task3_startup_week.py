@@ -323,20 +323,21 @@ def _ordered_pressure_lines(episode: dict) -> list[tuple[str, str]]:
 def _stakeholder_focus_order(
     rng: random.Random,
     stakeholders: list[StakeholderPersona],
-    goal_name: str,
+    episode: dict,
 ) -> list[StakeholderPersona]:
+    inventory = _pressure_inventory(episode)
     role_weights = {
-        "growth": {"Growth Lead": 3.5, "CEO": 2.2, "CFO": 1.2, "CTO": 1.0, "Head of CS": 1.0},
-        "retention": {"Head of CS": 3.6, "CEO": 2.1, "CFO": 1.1, "CTO": 1.2, "Growth Lead": 1.0},
-        "revenue": {"CFO": 3.0, "CEO": 2.8, "Growth Lead": 1.3, "Head of CS": 1.0, "CTO": 1.0},
-        "efficiency": {"CTO": 3.0, "CFO": 2.4, "CEO": 2.0, "Head of CS": 1.2, "Growth Lead": 1.0},
+        "CEO": 1.6 + max(float(payload["severity"]) for payload in inventory.values()),
+        "CFO": 1.1 + float(inventory["revenue"]["severity"]) + float(inventory["efficiency"]["severity"]),
+        "CTO": 1.1 + 1.1 * float(inventory["efficiency"]["severity"]) + 0.4 * float(inventory["retention"]["severity"]),
+        "Head of CS": 1.1 + 1.2 * float(inventory["retention"]["severity"]),
+        "Growth Lead": 1.1 + 1.2 * float(inventory["growth"]["severity"]),
     }
     remaining = stakeholders[:]
     ordered: list[StakeholderPersona] = []
-    weights_by_role = role_weights.get(goal_name, {})
     while remaining:
         weights = [
-            weights_by_role.get(stakeholder.role, 1.0)
+            role_weights.get(stakeholder.role, 1.0)
             + stakeholder.political_power * 0.6
             + stakeholder.credibility * 0.4
             + rng.uniform(0.0, 0.8)
@@ -375,7 +376,6 @@ def _persona_message(persona: StakeholderPersona, pressure_lines: list[tuple[str
 def _build_inbox(
     rng: random.Random,
     episode: dict,
-    goal_name: str,
     step_index: int,
     sim_date: str,
     realized_effects: list[TemporalEffectRecord],
@@ -391,7 +391,7 @@ def _build_inbox(
         ),
         reverse=True,
     )
-    primary, secondary, *remaining_people = _stakeholder_focus_order(rng, stakeholders, goal_name)
+    primary, secondary, *remaining_people = _stakeholder_focus_order(rng, stakeholders, episode)
     hot_account = accounts[0]
     pressure_lines = _ordered_pressure_lines(episode)
     items = [
@@ -599,7 +599,6 @@ def current_goal_name(hidden_goal: HiddenGoal, step_index: int) -> str:
 
 def build_task3_view(rng: random.Random, hidden_goal: HiddenGoal, episode: dict) -> dict:
     """Create the current observable bundle."""
-    goal_name = current_goal_name(hidden_goal, episode["step_index"])
     expose_ledger = bool(episode.get("expose_decision_ledger", True))
     alerts = list(episode["alerts"])
     sim_date = sim_date_for_step(episode["start_date"], episode["step_index"])
@@ -639,7 +638,7 @@ def build_task3_view(rng: random.Random, hidden_goal: HiddenGoal, episode: dict)
         "governance_constraints": [constraint.model_copy(deep=True) for constraint in episode["governance_constraints"]],
         "alerts": alerts,
         "calendar_events": calendar_events,
-        "inbox": _build_inbox(rng, episode, goal_name, episode["step_index"], sim_date, realized_effects, calendar_events),
+        "inbox": _build_inbox(rng, episode, episode["step_index"], sim_date, realized_effects, calendar_events),
         "narrative": _narrative(
             episode["step_index"],
             sim_date,

@@ -45,9 +45,9 @@ from latentgoalops.server.hidden_goals import (
     HiddenGoal,
     active_goal_name,
     belief_target,
-    active_weights,
     compute_utility,
     sample_hidden_goal,
+    snapshot_hidden_goal,
 )
 from latentgoalops.server.rewards import CHANNELS, compute_proxy_reward, strategy_embedding
 from latentgoalops.server.tasks.task1_feedback import build_task1_episode
@@ -169,21 +169,30 @@ class LatentGoalOpsEnvironment(
     def _infer_goal_hint_from_evidence(evidence: str) -> str:
         """Infer a rough visible objective from narrative evidence only."""
         lowered = evidence.lower()
-        if any(keyword in lowered for keyword in ("renewal", "account health", "trust", "support backlog", "fragile")):
+        if any(
+            keyword in lowered
+            for keyword in ("renewal", "account health", "trust", "support backlog", "fragile", "account stability")
+        ):
             return "retention"
-        if any(keyword in lowered for keyword in ("pricing", "monetization", "board", "commercial", "pipeline")):
+        if any(
+            keyword in lowered
+            for keyword in ("pricing", "monetization", "board", "commercial", "pipeline", "commercial capture")
+        ):
             return "revenue"
-        if any(keyword in lowered for keyword in ("margin", "latency", "cost-to-serve", "ops", "runway discipline")):
+        if any(
+            keyword in lowered
+            for keyword in ("margin", "latency", "cost-to-serve", "ops", "runway discipline", "operating leverage")
+        ):
             return "efficiency"
         return "growth"
 
     @staticmethod
     def _impact_summary(kpi_deltas: dict[str, float]) -> str:
         channel_labels = {
-            "growth": "activation and demand",
-            "retention": "renewal stability and trust",
-            "revenue": "monetization and expansion",
-            "efficiency": "cost-to-serve and delivery discipline",
+            "growth": "new-logo momentum",
+            "retention": "account stability",
+            "revenue": "commercial capture",
+            "efficiency": "operating leverage",
         }
         positives = [
             channel_labels[channel]
@@ -456,6 +465,7 @@ class LatentGoalOpsEnvironment(
         agent_value = selection_value(
             selected_ids,
             backlog,
+            int(round(budget)),
             self._hidden_goal.weights,
             self._hidden_goal,
             self._episode.get("company_profile"),
@@ -561,15 +571,40 @@ class LatentGoalOpsEnvironment(
             governance_strictness=self._hidden_goal.governance_strictness,
         )
 
+    def _oracle_belief_report(self, step_index: int) -> BeliefReport:
+        """Return a one-hot oracle posterior for belief-scored tasks."""
+        assert self._hidden_goal is not None
+        target = belief_target(self._hidden_goal, step_index)
+        shift_detected = self._hidden_goal.shift_step is not None and step_index >= self._hidden_goal.shift_step
+        return BeliefReport(
+            archetype_probs={target["archetype"]: 1.0},
+            risk_posture_probs={target["risk_posture"]: 1.0},
+            planning_horizon_probs={target["planning_horizon"]: 1.0},
+            segment_focus_probs={target["segment_focus"]: 1.0},
+            governance_strictness_probs={target["governance_strictness"]: 1.0},
+            shift_detected_confidence=1.0 if shift_detected else 0.0,
+            notes="Oracle latent-state posterior.",
+        )
+
     def _step_task3(self, action: LatentGoalOpsAction) -> LatentGoalOpsObservation:
         assert self._episode is not None
         assert self._hidden_goal is not None
         current_step_index = self._episode["step_index"]
         belief_metrics = self._record_belief_metrics(action, current_step_index)
-        current_weights = active_weights(self._hidden_goal, current_step_index)
-        oracle_action, oracle_decision_value = solve_task3_oracle_action(self._episode, current_weights)
+        current_objective = snapshot_hidden_goal(self._hidden_goal, current_step_index)
+        current_weights = dict(current_objective.weights)
+        oracle_action, oracle_decision_value = solve_task3_oracle_action(
+            self._episode,
+            current_weights,
+            objective=current_objective,
+        )
         del oracle_action
-        agent_decision_value = evaluate_task3_action_value(self._episode, action, current_weights)
+        agent_decision_value = evaluate_task3_action_value(
+            self._episode,
+            action,
+            current_weights,
+            objective=current_objective,
+        )
         stale_quality: float | None = None
         if (
             self._hidden_goal.shift_step is not None
@@ -659,12 +694,8 @@ class LatentGoalOpsEnvironment(
                 step_index=current_step_index,
             )
             if self._hidden_goal.shift_step is None:
-                adaptation_score = 1.0
-                adaptation_details = {
-                    "behavioral_shift_detection_delay_steps": 0,
-                    "post_shift_recovery": 1.0,
-                    "post_shift_regret": 0.0,
-                }
+                adaptation_score = None
+                adaptation_details = {"adaptation_scored": False}
             else:
                 post_shift_rows = [
                     row
@@ -674,6 +705,7 @@ class LatentGoalOpsEnvironment(
                 if not post_shift_rows:
                     adaptation_score = 0.0
                     adaptation_details = {
+                        "adaptation_scored": True,
                         "behavioral_shift_detection_delay_steps": self._episode["horizon"],
                         "post_shift_recovery": 0.0,
                         "post_shift_regret": 1.0,
@@ -700,6 +732,7 @@ class LatentGoalOpsEnvironment(
                     speed = max(0.0, 1.0 - detection_delay / remaining_window)
                     adaptation_score = 0.55 * speed + 0.45 * recovery
                     adaptation_details = {
+                        "adaptation_scored": True,
                         "behavioral_shift_detection_delay_steps": int(detection_delay),
                         "post_shift_recovery": round(float(recovery), 4),
                         "post_shift_regret": round(float(regret), 4),
@@ -748,9 +781,19 @@ class LatentGoalOpsEnvironment(
         assert self._hidden_goal is not None
         current_step_index = self._episode["step_index"]
         belief_metrics = self._record_belief_metrics(action, current_step_index)
-        current_weights = active_weights(self._hidden_goal, current_step_index)
-        _, oracle_decision_value = solve_task3_oracle_action(self._episode, current_weights)
-        agent_decision_value = evaluate_task3_action_value(self._episode, action, current_weights)
+        current_objective = snapshot_hidden_goal(self._hidden_goal, current_step_index)
+        current_weights = dict(current_objective.weights)
+        _, oracle_decision_value = solve_task3_oracle_action(
+            self._episode,
+            current_weights,
+            objective=current_objective,
+        )
+        agent_decision_value = evaluate_task3_action_value(
+            self._episode,
+            action,
+            current_weights,
+            objective=current_objective,
+        )
         stale_quality: float | None = None
         if (
             self._hidden_goal.shift_step is not None
@@ -824,12 +867,8 @@ class LatentGoalOpsEnvironment(
                 step_index=current_step_index,
             )
             if self._hidden_goal.shift_step is None:
-                adaptation_score = 1.0
-                adaptation_details = {
-                    "behavioral_shift_detection_delay_steps": 0,
-                    "post_shift_recovery": 1.0,
-                    "post_shift_regret": 0.0,
-                }
+                adaptation_score = None
+                adaptation_details = {"adaptation_scored": False}
             else:
                 post_shift_rows = [
                     row
@@ -839,6 +878,7 @@ class LatentGoalOpsEnvironment(
                 if not post_shift_rows:
                     adaptation_score = 0.0
                     adaptation_details = {
+                        "adaptation_scored": True,
                         "behavioral_shift_detection_delay_steps": self._episode["horizon"],
                         "post_shift_recovery": 0.0,
                         "post_shift_regret": 1.0,
@@ -865,6 +905,7 @@ class LatentGoalOpsEnvironment(
                     speed = max(0.0, 1.0 - detection_delay / remaining_window)
                     adaptation_score = 0.55 * speed + 0.45 * recovery
                     adaptation_details = {
+                        "adaptation_scored": True,
                         "behavioral_shift_detection_delay_steps": int(detection_delay),
                         "post_shift_recovery": round(float(recovery), 4),
                         "post_shift_regret": round(float(regret), 4),
@@ -910,9 +951,20 @@ class LatentGoalOpsEnvironment(
         assert self._hidden_goal is not None
         current_step_index = self._episode["step_index"]
         belief_metrics = self._record_belief_metrics(action, current_step_index)
-        current_weights = active_weights(self._hidden_goal, current_step_index)
-        _, oracle_decision_value = solve_task7_oracle_action(self._episode, current_weights)
-        agent_decision_value = evaluate_task7_action_value(self._episode, action, current_weights)
+        current_objective = snapshot_hidden_goal(self._hidden_goal, current_step_index)
+        current_weights = dict(current_objective.weights)
+        _, oracle_decision_value = solve_task7_oracle_action(
+            self._episode,
+            current_weights,
+            objective=current_objective,
+            step_index=current_step_index,
+        )
+        agent_decision_value = evaluate_task7_action_value(
+            self._episode,
+            action,
+            current_weights,
+            objective=current_objective,
+        )
         stale_quality: float | None = None
         if (
             self._hidden_goal.shift_step is not None
@@ -984,8 +1036,9 @@ class LatentGoalOpsEnvironment(
                     row for row in self._episode["decision_quality_history"] if row["step_index"] >= self._hidden_goal.shift_step
                 ]
             if not post_shift_rows:
-                adaptation_score = 1.0 if self._hidden_goal.shift_step is None else 0.0
+                adaptation_score = None if self._hidden_goal.shift_step is None else 0.0
                 adaptation_details = {
+                    "adaptation_scored": self._hidden_goal.shift_step is not None,
                     "behavioral_shift_detection_delay_steps": 0 if self._hidden_goal.shift_step is None else self._episode["horizon"],
                     "post_shift_recovery": 1.0 if self._hidden_goal.shift_step is None else 0.0,
                     "post_shift_regret": 0.0 if self._hidden_goal.shift_step is None else 1.0,
@@ -1014,6 +1067,7 @@ class LatentGoalOpsEnvironment(
                 post_shift_coherence = trajectory_coherence(post_shift_actions)
                 adaptation_score = (0.40 * speed + 0.60 * recovery) * post_shift_coherence
                 adaptation_details = {
+                    "adaptation_scored": True,
                     "behavioral_shift_detection_delay_steps": int(detection_delay),
                     "post_shift_recovery": round(float(recovery), 4),
                     "post_shift_regret": round(float(regret), 4),
@@ -1216,10 +1270,10 @@ class LatentGoalOpsEnvironment(
     @staticmethod
     def _visible_channel_proxy(item: dict[str, Any]) -> dict[str, float]:
         labels = {
-            "growth": "activation and demand",
-            "retention": "renewal stability and trust",
-            "revenue": "monetization and expansion",
-            "efficiency": "cost-to-serve and delivery discipline",
+            "growth": "new-logo momentum",
+            "retention": "account stability",
+            "revenue": "commercial capture",
+            "efficiency": "operating leverage",
         }
         proxy = {channel: 0.0 for channel in CHANNELS}
         kind = str(item.get("kind", "growth"))
@@ -1231,7 +1285,7 @@ class LatentGoalOpsEnvironment(
             if f"trade-offs on {label}" in impact_summary:
                 proxy[channel] -= 0.02
             elif label in impact_summary:
-                proxy[channel] += 0.04
+                proxy[channel] += 0.02
 
         notes = " ".join(str(note).lower() for note in item.get("risk_notes", []))
         if any(keyword in notes for keyword in ("renewal", "trust", "sla", "support")):
@@ -1280,12 +1334,16 @@ class LatentGoalOpsEnvironment(
 
         score = 0.0
         utilities: dict[str, float] = {}
+        synergy_bonus = 0.0
+        dependency_coverage = 0
         for item_id, item in chosen.items():
             utility = cls._visible_item_alignment(item, goal_weights)
             if item.get("requires_item_ids") and not any(
                 required in chosen for required in item.get("requires_item_ids", [])
             ):
                 utility *= 0.60
+            elif item.get("requires_item_ids"):
+                dependency_coverage += 1
             if item.get("synergy_item_ids") and any(
                 synergy in chosen for synergy in item.get("synergy_item_ids", [])
             ):
@@ -1294,15 +1352,32 @@ class LatentGoalOpsEnvironment(
             score += utility
 
         for item_id, item in chosen.items():
+            for synergy_id in item.get("synergy_item_ids", []):
+                synergy_id = str(synergy_id)
+                if synergy_id in chosen and item_id < synergy_id:
+                    synergy_bonus += 0.06 * min(utilities[item_id], utilities[synergy_id])
             for conflict_id in item.get("conflicts_with_ids", []):
-                if conflict_id in chosen and item_id < str(conflict_id):
-                    score -= 0.14 * min(utilities[item_id], utilities[str(conflict_id)])
+                conflict_id = str(conflict_id)
+                if conflict_id in chosen and item_id < conflict_id:
+                    score -= 0.14 * min(utilities[item_id], utilities[conflict_id])
 
         score -= 0.02 * max(0, len(chosen) - 4)
+        spend_ratio = spent_budget / max(budget_limit, 1.0) if budget_limit > 0.0 else 1.0
         if budget_limit > 0.0:
             score += 0.03 * min(1.0, spent_budget / budget_limit)
         if len({str(item.get("kind", "growth")) for item in chosen.values()}) == 1:
             score += 0.02
+        if len(chosen) >= 4 and spend_ratio >= 0.72:
+            score += 0.05
+        if dependency_coverage > 0:
+            score += 0.02 * min(dependency_coverage, 2)
+        if len(chosen) <= 3 and spend_ratio < 0.65:
+            score -= 0.10
+        if len(chosen) <= 2:
+            score -= 0.04
+        if spend_ratio < 0.50:
+            score -= 0.04
+        score += synergy_bonus
         return score
 
     @classmethod
@@ -1388,10 +1463,17 @@ class LatentGoalOpsEnvironment(
                     score -= 0.10 * min(utilities[item_id], utilities[conflict_id])
 
         score -= risk_penalty
-        score -= 0.018 * max(0, len(chosen) - 4)
+        score -= 0.020 * max(0, len(chosen) - 4)
         total_allocated = sum(amount for _, amount in chosen.values())
-        if total_allocated > 0.0 and max(allocated_by_kind.values()) / total_allocated >= 0.55:
-            score += 0.03
+        funded_kind_count = len(allocated_by_kind)
+        if funded_kind_count >= 3:
+            score -= 0.045 * (funded_kind_count - 2)
+        if total_allocated > 0.0:
+            dominant_share = max(allocated_by_kind.values()) / total_allocated
+            if dominant_share >= 0.55:
+                score += 0.05
+            elif funded_kind_count >= 3 and dominant_share < 0.45:
+                score -= 0.06
         return score
 
     @classmethod
@@ -2009,8 +2091,20 @@ class LatentGoalOpsEnvironment(
                 rationale_summary="Oracle capital allocation.",
             )
         if self._task_id == TaskId.TASK7:
-            oracle_action, _ = solve_task7_oracle_action(self._episode, active_weights(self._hidden_goal, self._episode["step_index"]))
-            return oracle_action.model_copy(update={"rationale_summary": "Oracle quarterly headcount plan."})
+            step_index = self._episode["step_index"]
+            current_objective = snapshot_hidden_goal(self._hidden_goal, step_index)
+            oracle_action, _ = solve_task7_oracle_action(
+                self._episode,
+                current_objective.weights,
+                objective=current_objective,
+                step_index=step_index,
+            )
+            return oracle_action.model_copy(
+                update={
+                    "rationale_summary": "Oracle quarterly headcount plan.",
+                    "belief_report": self._oracle_belief_report(step_index),
+                }
+            )
         if self._task_id == TaskId.TASK5:
             return self._episode["oracle_action"].model_copy(
                 update={"rationale": "Oracle crisis-response package."}
@@ -2018,18 +2112,24 @@ class LatentGoalOpsEnvironment(
         if self._task_id == TaskId.TASK6:
             step_index = self._episode["step_index"]
             active_goal = active_goal_name(self._hidden_goal, step_index)
-            weights = active_weights(self._hidden_goal, step_index)
-            oracle_action, _ = solve_task3_oracle_action(self._episode, weights)
+            current_objective = snapshot_hidden_goal(self._hidden_goal, step_index)
+            oracle_action, _ = solve_task3_oracle_action(
+                self._episode,
+                current_objective.weights,
+                objective=current_objective,
+            )
             return oracle_action.model_copy(
                 update={
                     "task_id": self._task_id,
                     "rationale": f"Oracle incident-response action using latent goal knowledge for {active_goal}.",
+                    "belief_report": self._oracle_belief_report(step_index),
                 }
             )
 
         step_index = self._episode["step_index"]
         active_goal = active_goal_name(self._hidden_goal, step_index)
-        weights = active_weights(self._hidden_goal, step_index)
+        current_objective = snapshot_hidden_goal(self._hidden_goal, step_index)
+        weights = dict(current_objective.weights)
         planning_weights = dict(weights)
         if (
             self._hidden_goal.shift_step is not None
@@ -2047,9 +2147,18 @@ class LatentGoalOpsEnvironment(
                 / total_window
                 for channel in weights
             }
-        oracle_action, _ = solve_task3_oracle_action(self._episode, planning_weights)
+        planning_objective = snapshot_hidden_goal(self._hidden_goal, step_index)
+        planning_objective.weights = planning_weights
+        oracle_action, _ = solve_task3_oracle_action(
+            self._episode,
+            planning_weights,
+            objective=planning_objective,
+        )
         return oracle_action.model_copy(
-            update={"rationale": f"Oracle action using latent goal knowledge for {active_goal}."}
+            update={
+                "rationale": f"Oracle action using latent goal knowledge for {active_goal}.",
+                "belief_report": self._oracle_belief_report(step_index),
+            }
         )
 
     @property

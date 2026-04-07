@@ -58,3 +58,21 @@ def test_task5_score_ordering():
     random_score = sum(_run_single("task5_crisis_response", "random", seed) for seed in seeds) / len(seeds)
     assert oracle >= heuristic >= 0.0
     assert heuristic >= random_score
+
+
+def test_task6_score_ordering():
+    seeds = list(range(40, 50))
+    oracle = sum(_run_single("task6_incident_response_week", "oracle", seed) for seed in seeds) / len(seeds)
+    heuristic = sum(_run_single("task6_incident_response_week", "heuristic", seed) for seed in seeds) / len(seeds)
+    random_score = sum(_run_single("task6_incident_response_week", "random", seed) for seed in seeds) / len(seeds)
+    assert oracle >= heuristic >= 0.0
+    assert heuristic >= random_score
+
+
+def test_task7_score_ordering():
+    seeds = list(range(50, 65))
+    oracle = sum(_run_single("task7_quarterly_headcount_plan", "oracle", seed) for seed in seeds) / len(seeds)
+    heuristic = sum(_run_single("task7_quarterly_headcount_plan", "heuristic", seed) for seed in seeds) / len(seeds)
+    random_score = sum(_run_single("task7_quarterly_headcount_plan", "random", seed) for seed in seeds) / len(seeds)
+    assert oracle >= heuristic >= 0.0
+    assert heuristic >= random_score

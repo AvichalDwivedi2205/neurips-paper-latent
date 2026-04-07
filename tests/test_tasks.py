@@ -79,6 +79,20 @@ def test_task2_public_backlog_redacts_exact_kpi_deltas():
     assert all(item.impact_summary for item in observation.backlog)
 
 
+def test_task2_summaries_surface_visible_portfolio_paths():
+    env = LatentGoalOpsEnvironment()
+    observation = env.reset(seed=10, task_id="task2_roadmap_priority")
+    summaries = [item.impact_summary for item in observation.backlog]
+    assert any(
+        summary and (
+            "Visible prerequisite:" in summary
+            or "Combines visibly well with" in summary
+            or "Avoid pairing with" in summary
+        )
+        for summary in summaries
+    )
+
+
 def test_task2_visible_accounts_cover_backlog_and_notes():
     env = LatentGoalOpsEnvironment()
     observation = env.reset(seed=10, task_id="task2_roadmap_priority")
@@ -322,6 +336,7 @@ def test_task7_runs_to_completion_and_tracks_quarters():
         observation = env.step(env.sample_heuristic_action())
     assert env.last_grade is not None
     assert 0.0 <= env.last_grade.score <= 1.0
+    assert env.state.step_count == 4
 
 
 def test_task7_backlog_exposes_bundle_structure():
@@ -331,6 +346,16 @@ def test_task7_backlog_exposes_bundle_structure():
         item.requires_item_ids or item.conflicts_with_ids or item.synergy_item_ids or item.risk_notes
         for item in observation.backlog
     )
+
+
+def test_task7_oracle_action_includes_perfect_belief_report():
+    env = LatentGoalOpsEnvironment()
+    env.reset(seed=26, task_id="task7_quarterly_headcount_plan")
+    action = env.sample_oracle_action()
+    hidden_goal = env._hidden_goal  # noqa: SLF001
+    assert hidden_goal is not None
+    assert action.belief_report is not None
+    assert action.belief_report.archetype_probs[hidden_goal.archetype.value] == 1.0
 
 
 def test_task7_shift_occurs_with_reaction_window_when_present():
@@ -350,6 +375,30 @@ def test_task7_shift_occurs_with_reaction_window_when_present():
     assert all(step <= 1 for step in observed_shift_steps)
     assert all(shift_type == "abrupt" for shift_type in observed_shift_types)
     assert all(duration == 1 for duration in observed_shift_durations)
+
+
+def test_task7_goal_history_tracks_active_goal_after_shift():
+    env = LatentGoalOpsEnvironment()
+    shifted_seed = None
+    for seed in range(100):
+        env.reset(seed=seed, task_id="task7_quarterly_headcount_plan")
+        hidden_goal = env._hidden_goal  # noqa: SLF001
+        if hidden_goal is not None and hidden_goal.shift_step is not None:
+            shifted_seed = seed
+            break
+    assert shifted_seed is not None
+
+    observation = env.reset(seed=shifted_seed, task_id="task7_quarterly_headcount_plan")
+    while not observation.done:
+        observation = env.step(env.sample_oracle_action())
+
+    hidden_goal = env._hidden_goal  # noqa: SLF001
+    assert hidden_goal is not None
+    goal_history = env._episode["goal_history"]  # noqa: SLF001
+    assert len(goal_history) == env.state.step_count + 1
+    assert goal_history[0] == hidden_goal.archetype.value
+    assert hidden_goal.shift_goal is not None
+    assert hidden_goal.shift_goal.value in goal_history[hidden_goal.shift_step + 1 :]
 
 
 def test_task3_horizon_override_caps_delayed_effect_schedule():

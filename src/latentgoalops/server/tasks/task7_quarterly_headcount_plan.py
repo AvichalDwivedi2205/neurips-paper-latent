@@ -16,7 +16,7 @@ from latentgoalops.models import (
     TemporalEffectRecord,
 )
 from latentgoalops.server.config import load_config
-from latentgoalops.server.hidden_goals import HiddenGoal, active_state, compute_utility
+from latentgoalops.server.hidden_goals import HiddenGoal, active_goal_name, active_state, compute_utility
 from latentgoalops.server.memory import (
     apply_agent_writes,
     auto_visible_entities,
@@ -428,6 +428,7 @@ def build_task7_episode(
         hidden_goal.weights,
         hidden_goal,
         company_profile,
+        step_index=episode["step_index"],
     )
     episode["oracle_value"] = oracle_value
     episode["oracle_allocations"] = oracle_allocations
@@ -436,6 +437,23 @@ def build_task7_episode(
 
 def build_task7_view(episode: dict) -> dict:
     """Create the current observable bundle."""
+    signals = _headcount_state_signals(episode)
+    stakeholder_notes = [
+        f"{stakeholder.name} ({stakeholder.role}) is watching whether hiring matches {episode['company_profile'].board_narrative}."
+        for stakeholder in episode["stakeholders"][:2]
+    ]
+    if signals["support_stress"] >= 0.20 or signals["reliability_gap"] >= 0.20:
+        stakeholder_notes.append(
+            "Support load and delivery reliability are visibly strained, so front-line growth hiring without enablement could backfire."
+        )
+    if signals["expansion_pressure"] >= 0.40:
+        stakeholder_notes.append(
+            "There is visible commercial upside in expansion-ready accounts if execution and coverage stay credible."
+        )
+    if signals["margin_gap"] >= 0.18 or signals["runway_tightness"] >= 0.18:
+        stakeholder_notes.append(
+            "Finance is openly scrutinizing hires that add cost before operating leverage shows up."
+        )
     return {
         "step_index": episode["step_index"],
         "horizon": episode["horizon"],
@@ -462,10 +480,7 @@ def build_task7_view(episode: dict) -> dict:
         "memory_budget_remaining": episode["memory_bank"]["retrieval_budget_remaining"],
         "memory_write_budget_remaining": episode["memory_bank"]["write_budget_remaining"],
         "sprint_budget": episode["quarterly_budget"],
-        "stakeholder_notes": [
-            f"{stakeholder.name} ({stakeholder.role}) is watching whether hiring matches {episode['company_profile'].board_narrative}."
-            for stakeholder in episode["stakeholders"][:3]
-        ],
+        "stakeholder_notes": stakeholder_notes,
     }
 
 
@@ -527,14 +542,17 @@ def solve_task7_oracle_action(
     episode: dict,
     weights: dict[str, float],
     objective: HiddenGoal | None = None,
+    step_index: int | None = None,
 ) -> tuple[LatentGoalOpsAction, float]:
     """Find a strong visible quarterly hiring allocation."""
+    current_step = episode["step_index"] if step_index is None else int(step_index)
     allocations, value = solve_oracle_allocations(
         episode["backlog"],
         int(episode["budget_remaining"]),
         weights,
         objective or episode["hidden_goal"],
         episode["company_profile"],
+        step_index=current_step,
     )
     return (
         LatentGoalOpsAction(
@@ -730,7 +748,7 @@ def apply_task7_action(rng: random.Random, hidden_goal: HiddenGoal, episode: dic
     episode["realized_effects"] = realized_effects
     episode["step_index"] = next_step
     episode["action_history"].append(action)
-    episode["goal_history"].append(hidden_goal.archetype.value)
+    episode["goal_history"].append(active_goal_name(hidden_goal, episode["step_index"]))
     episode["budget_remaining"] = min(episode["quarterly_budget"], episode["total_budget_remaining"])
     episode["alerts"] = []
     if next_step in episode["events"]:

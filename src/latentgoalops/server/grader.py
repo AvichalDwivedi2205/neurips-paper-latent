@@ -9,6 +9,14 @@ from latentgoalops.server.hidden_goals import compute_utility, feedback_category
 from latentgoalops.server.rewards import CHANNELS, cosine_similarity, strategy_embedding
 
 
+def _weighted_score(components: list[tuple[str, float | None, float]]) -> tuple[float, dict[str, float], bool]:
+    """Average weighted components, renormalizing when some metrics are not applicable."""
+    active = [(name, float(value), float(weight)) for name, value, weight in components if value is not None]
+    total_weight = sum(weight for _, _, weight in active) or 1.0
+    score = sum(value * weight for _, value, weight in active) / total_weight
+    return score, {name: round(value, 4) for name, value, _ in active}, any(name == "adaptation" for name, _, _ in active)
+
+
 def grade_task1(
     true_labels: dict[str, FeedbackLabel],
     true_priorities: dict[str, int],
@@ -71,88 +79,79 @@ def grade_task2(
 
 def grade_task3(
     latent_utility: float,
-    adaptation_score: float,
+    adaptation_score: float | None,
     coherence_score: float,
     constraint_score: float,
     belief_score: float | None = None,
 ) -> GraderResult:
     """Grade the startup-week task."""
-    if belief_score is None:
-        score = 0.50 * latent_utility + 0.25 * adaptation_score + 0.15 * coherence_score + 0.10 * constraint_score
-    else:
-        score = (
-            0.42 * latent_utility
-            + 0.20 * adaptation_score
-            + 0.12 * coherence_score
-            + 0.08 * constraint_score
-            + 0.18 * belief_score
-        )
+    score, sub_scores, adaptation_scored = _weighted_score(
+        [
+            ("final_utility", latent_utility, 0.50),
+            ("adaptation", adaptation_score, 0.25),
+            ("coherence", coherence_score, 0.15),
+            ("constraints", constraint_score, 0.10),
+        ]
+    )
+    if belief_score is not None:
+        sub_scores["belief_tracking"] = round(float(belief_score), 4)
     return GraderResult(
         task_id=TaskId.TASK3,
         score=round(float(max(0.0, min(1.0, score))), 4),
-        sub_scores={
-            "final_utility": round(float(latent_utility), 4),
-            "adaptation": round(float(adaptation_score), 4),
-            "coherence": round(float(coherence_score), 4),
-            "constraints": round(float(constraint_score), 4),
-            **({"belief_tracking": round(float(belief_score), 4)} if belief_score is not None else {}),
-        },
+        sub_scores=sub_scores,
+        details={"adaptation_scored": adaptation_scored},
     )
 
 
 def grade_task6(
     latent_utility: float,
-    adaptation_score: float,
+    adaptation_score: float | None,
     coherence_score: float,
     constraint_score: float,
-    belief_score: float,
+    belief_score: float | None = None,
 ) -> GraderResult:
     """Grade the incident-response week task."""
-    score = (
-        0.38 * latent_utility
-        + 0.24 * adaptation_score
-        + 0.10 * coherence_score
-        + 0.10 * constraint_score
-        + 0.18 * belief_score
+    score, sub_scores, adaptation_scored = _weighted_score(
+        [
+            ("final_utility", latent_utility, 0.4634),
+            ("adaptation", adaptation_score, 0.2927),
+            ("coherence", coherence_score, 0.1220),
+            ("constraints", constraint_score, 0.1220),
+        ]
     )
+    if belief_score is not None:
+        sub_scores["belief_tracking"] = round(float(belief_score), 4)
     return GraderResult(
         task_id=TaskId.TASK6,
         score=round(float(max(0.0, min(1.0, score))), 4),
-        sub_scores={
-            "final_utility": round(float(latent_utility), 4),
-            "adaptation": round(float(adaptation_score), 4),
-            "coherence": round(float(coherence_score), 4),
-            "constraints": round(float(constraint_score), 4),
-            "belief_tracking": round(float(belief_score), 4),
-        },
+        sub_scores=sub_scores,
+        details={"adaptation_scored": adaptation_scored},
     )
 
 
 def grade_task7(
     latent_utility: float,
-    adaptation_score: float,
+    adaptation_score: float | None,
     coherence_score: float,
     constraint_score: float,
-    belief_score: float,
+    belief_score: float | None = None,
 ) -> GraderResult:
     """Grade the quarterly headcount planning task."""
-    score = (
-        0.56 * latent_utility
-        + 0.23 * adaptation_score
-        + 0.05 * coherence_score
-        + 0.04 * constraint_score
-        + 0.12 * belief_score
+    score, sub_scores, adaptation_scored = _weighted_score(
+        [
+            ("final_utility", latent_utility, 0.6364),
+            ("adaptation", adaptation_score, 0.2614),
+            ("coherence", coherence_score, 0.0568),
+            ("constraints", constraint_score, 0.0454),
+        ]
     )
+    if belief_score is not None:
+        sub_scores["belief_tracking"] = round(float(belief_score), 4)
     return GraderResult(
         task_id=TaskId.TASK7,
         score=round(float(max(0.0, min(1.0, score))), 4),
-        sub_scores={
-            "final_utility": round(float(latent_utility), 4),
-            "adaptation": round(float(adaptation_score), 4),
-            "coherence": round(float(coherence_score), 4),
-            "constraints": round(float(constraint_score), 4),
-            "belief_tracking": round(float(belief_score), 4),
-        },
+        sub_scores=sub_scores,
+        details={"adaptation_scored": adaptation_scored},
     )
 
 
