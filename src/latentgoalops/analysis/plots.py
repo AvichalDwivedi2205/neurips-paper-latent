@@ -119,11 +119,15 @@ def plot_parse_fallbacks(episodes: pd.DataFrame, output_path: str | Path) -> Non
     columns = ["parse_fallback"]
     if "parse_repaired" in episodes.columns:
         columns.append("parse_repaired")
+    if "empty_fallback_episode" in episodes.columns:
+        columns.append("empty_fallback_episode")
+    if "response_cap_hit" in episodes.columns:
+        columns.append("response_cap_hit")
     summary = episodes.groupby(["policy", "model_name"], as_index=False)[columns].mean()
     summary = summary.melt(id_vars=["policy", "model_name"], value_vars=columns, var_name="outcome", value_name="rate")
     fig, ax = plt.subplots(figsize=(10, 5))
     sns.barplot(data=summary, x="model_name", y="rate", hue="outcome", ax=ax)
-    ax.set_title("Parse Rescue / Fallback Rate")
+    ax.set_title("Output Validity / Cap-Hit Rate")
     ax.set_ylabel("Episode fraction")
     ax.tick_params(axis="x", rotation=25)
     _save(fig, output_path)
@@ -133,7 +137,12 @@ def plot_adaptation_distribution(episodes: pd.DataFrame, output_path: str | Path
     """Task 3 adaptation-score distribution."""
     if episodes.empty or "subscore_adaptation" not in episodes.columns:
         return
-    task3 = episodes[episodes["task_id"] == "task3_startup_week"]
+    task3 = episodes[
+        (episodes["task_id"] == "task3_startup_week")
+        & episodes["subscore_adaptation"].notna()
+    ]
+    if "adaptation_scored" in task3.columns:
+        task3 = task3[task3["adaptation_scored"] == 1]
     if task3.empty:
         return
     fig, ax = plt.subplots(figsize=(10, 6))

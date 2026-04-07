@@ -49,6 +49,40 @@ def _observation_text(observation: dict) -> str:
     return " ".join(parts).lower()
 
 
+def _sender_only_text(observation: dict) -> str:
+    parts: list[str] = []
+    parts.extend(str(item.get("sender", "")) for item in observation.get("inbox", []))
+    parts.extend(str(stakeholder.get("role", "")) for stakeholder in observation.get("stakeholders", []))
+    return " ".join(parts).lower()
+
+
+def _stakeholder_order_text(observation: dict) -> str:
+    ordered_roles = [str(stakeholder.get("role", "")) for stakeholder in observation.get("stakeholders", [])]
+    return " > ".join(ordered_roles).lower()
+
+
+def _impact_summary_text(observation: dict) -> str:
+    parts: list[str] = []
+    for item in observation.get("backlog", []):
+        parts.append(str(item.get("impact_summary", "")))
+        parts.extend(item.get("risk_notes", []))
+        parts.extend(item.get("beneficiary_segments", []))
+    return " ".join(parts).lower()
+
+
+def _metadata_only_text(observation: dict) -> str:
+    parts: list[str] = []
+    for stakeholder in observation.get("stakeholders", []):
+        parts.append(str(stakeholder.get("role", "")))
+        parts.extend(stakeholder.get("favorite_metrics", []))
+        parts.extend(stakeholder.get("hard_constraints", []))
+    for account in observation.get("accounts", []):
+        parts.append(str(account.get("segment", "")))
+        parts.append(str(account.get("support_tier", "")))
+        parts.append(str(account.get("sla_level", "")))
+    return " ".join(parts).lower()
+
+
 def _numeric_features(observation: dict) -> dict[str, float]:
     dashboard = observation.get("dashboard", {}) or {}
     market_context = observation.get("market_context", {}) or {}
@@ -104,17 +138,19 @@ def _explicit_goal_leak(text: str) -> int:
     return int(any(re.search(pattern, lowered) for pattern in patterns))
 
 
-def _build_vocab(train_rows: list[dict], max_size: int) -> list[str]:
+def _build_vocab(train_rows: list[dict], max_size: int, text_key: str | None) -> list[str]:
+    if text_key is None:
+        return []
     counts: Counter[str] = Counter()
     for row in train_rows:
-        counts.update(_token_counts(row["text"]))
+        counts.update(_token_counts(row[text_key]))
     return [token for token, _ in counts.most_common(max_size)]
 
 
-def _vectorize(rows: list[dict], vocab: list[str], numeric_keys: list[str]) -> np.ndarray:
+def _vectorize(rows: list[dict], vocab: list[str], numeric_keys: list[str], text_key: str | None) -> np.ndarray:
     matrix = []
     for row in rows:
-        token_counts = _token_counts(row["text"])
+        token_counts = _token_counts(row[text_key]) if text_key is not None else Counter()
         text_vector = [float(token_counts.get(token, 0.0)) for token in vocab]
         numeric_vector = [float(row["numeric"][key]) for key in numeric_keys]
         matrix.append(text_vector + numeric_vector)
@@ -152,23 +188,33 @@ def _collect_examples(tasks: list[str], seeds: list[int], config: ExperimentConf
                     "task_id": task_id,
                     "seed": seed,
                     "label": hidden_goal.archetype.value if hidden_goal is not None else "unknown",
-                    "text": _observation_text(observation.model_dump(mode="json")),
+                    "full_text": _observation_text(observation.model_dump(mode="json")),
+                    "sender_only_text": _sender_only_text(observation.model_dump(mode="json")),
+                    "stakeholder_order_text": _stakeholder_order_text(observation.model_dump(mode="json")),
+                    "impact_summary_text": _impact_summary_text(observation.model_dump(mode="json")),
+                    "metadata_only_text": _metadata_only_text(observation.model_dump(mode="json")),
                     "numeric": _numeric_features(observation.model_dump(mode="json")),
                 }
             )
     return rows
 
 
-def _task_report(rows: list[dict], vocab_size: int) -> dict:
+def _task_report(
+    rows: list[dict],
+    vocab_size: int,
+    *,
+    text_key: str | None,
+    include_numeric: bool,
+) -> dict:
     if not rows:
         return {}
     midpoint = max(1, len(rows) // 2)
     train_rows = rows[:midpoint]
     test_rows = rows[midpoint:]
-    numeric_keys = sorted(train_rows[0]["numeric"].keys())
-    vocab = _build_vocab(train_rows, vocab_size)
-    train_features = _vectorize(train_rows, vocab, numeric_keys)
-    test_features = _vectorize(test_rows, vocab, numeric_keys)
+    numeric_keys = sorted(train_rows[0]["numeric"].keys()) if include_numeric else []
+    vocab = _build_vocab(train_rows, vocab_size, text_key)
+    train_features = _vectorize(train_rows, vocab, numeric_keys, text_key)
+    test_features = _vectorize(test_rows, vocab, numeric_keys, text_key)
 
     mean = train_features.mean(axis=0)
     std = np.where(train_features.std(axis=0) < 1e-6, 1.0, train_features.std(axis=0))
@@ -189,7 +235,11 @@ def _task_report(rows: list[dict], vocab_size: int) -> dict:
     for label, prediction in zip(test_labels, predictions):
         confusion[label][prediction] += 1
 
-    explicit_leak_rate = sum(_explicit_goal_leak(row["text"]) for row in rows) / len(rows)
+    explicit_leak_rate = (
+        sum(_explicit_goal_leak(row[text_key]) for row in rows) / len(rows)
+        if text_key is not None
+        else 0.0
+    )
     return {
         "n_train": len(train_rows),
         "n_test": len(test_rows),
@@ -197,6 +247,7 @@ def _task_report(rows: list[dict], vocab_size: int) -> dict:
         "explicit_goal_token_rate": round(float(explicit_leak_rate), 4),
         "confusion": {label: dict(values) for label, values in confusion.items()},
         "vocab_size": len(vocab),
+        "numeric_feature_count": len(numeric_keys),
     }
 
 
@@ -226,7 +277,43 @@ def main() -> None:
         "tasks": tasks,
         "seeds": seeds,
         "results": {
-            task_id: _task_report([row for row in rows if row["task_id"] == task_id], args.vocab_size)
+            task_id: (
+                lambda task_rows: {
+                    **_task_report(task_rows, args.vocab_size, text_key="full_text", include_numeric=True),
+                    "views": {
+                        "sender_only": _task_report(
+                            task_rows,
+                            args.vocab_size,
+                            text_key="sender_only_text",
+                            include_numeric=False,
+                        ),
+                        "stakeholder_order_only": _task_report(
+                            task_rows,
+                            args.vocab_size,
+                            text_key="stakeholder_order_text",
+                            include_numeric=False,
+                        ),
+                        "impact_summary_only": _task_report(
+                            task_rows,
+                            args.vocab_size,
+                            text_key="impact_summary_text",
+                            include_numeric=False,
+                        ),
+                        "metadata_only": _task_report(
+                            task_rows,
+                            args.vocab_size,
+                            text_key="metadata_only_text",
+                            include_numeric=False,
+                        ),
+                        "numeric_only": _task_report(
+                            task_rows,
+                            args.vocab_size,
+                            text_key=None,
+                            include_numeric=True,
+                        ),
+                    },
+                }
+            )([row for row in rows if row["task_id"] == task_id])
             for task_id in tasks
         },
     }

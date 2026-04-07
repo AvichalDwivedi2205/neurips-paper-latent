@@ -51,7 +51,6 @@ def expected_calibration_error(rows: list[tuple[float, bool]], buckets: int = 10
 
 def score_belief_report(report: BeliefReport | None, target: dict[str, str]) -> dict[str, float]:
     """Score one factorized belief report against the active latent state."""
-    report = report or BeliefReport()
     universes = {
         "archetype": ["growth", "retention", "revenue", "efficiency"],
         "risk_posture": ["aggressive", "balanced", "conservative"],
@@ -59,6 +58,16 @@ def score_belief_report(report: BeliefReport | None, target: dict[str, str]) -> 
         "segment_focus": ["self_serve", "smb", "mid_market", "enterprise", "strategic"],
         "governance_strictness": ["flexible", "moderate", "strict"],
     }
+    if report is None:
+        scores: dict[str, float] = {}
+        for field, universe in universes.items():
+            scores[f"{field}_brier"] = 1.0
+            scores[f"{field}_nll"] = math.log(len(universe))
+            scores[f"{field}_confidence"] = 0.0
+            scores[f"{field}_correct"] = 0.0
+        scores["belief_report_missing"] = 1.0
+        return scores
+
     fields = {
         "archetype": report.archetype_probs,
         "risk_posture": report.risk_posture_probs,
@@ -77,4 +86,5 @@ def score_belief_report(report: BeliefReport | None, target: dict[str, str]) -> 
         scores[f"{field}_nll"] = negative_log_likelihood(probs, target_value, universe)
         scores[f"{field}_confidence"] = confidence
         scores[f"{field}_correct"] = 1.0 if top_label == target_value else 0.0
+    scores["belief_report_missing"] = 0.0
     return scores
