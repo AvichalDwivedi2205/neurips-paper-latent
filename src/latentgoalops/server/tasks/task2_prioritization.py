@@ -8,6 +8,7 @@ import random
 from latentgoalops.models import CustomerAccount, DashboardState, InitiativeItem, StakeholderPersona
 from latentgoalops.server.hidden_goals import HiddenGoal
 from latentgoalops.server.objective_utils import structured_item_multiplier
+from latentgoalops.server.public_reasoning import build_public_impact_summary
 from latentgoalops.server.tasks.template_bank import load_initiative_effects
 
 
@@ -221,77 +222,53 @@ def _item_prefix(item_id: str) -> str:
     return item_id
 
 
-def _channel_labels() -> dict[str, str]:
-    return {
-        "growth": "new-logo momentum",
-        "retention": "account stability",
-        "revenue": "commercial capture",
-        "efficiency": "operating leverage",
-    }
-
-
 def _task2_impact_summary(
     item: InitiativeItem,
     family_size: int,
     accounts_by_id: dict[str, CustomerAccount],
     backlog_by_id: dict[str, InitiativeItem],
 ) -> str:
-    labels = _channel_labels()
-    positives = [
-        labels[channel]
-        for channel, value in sorted(item.kpi_deltas.items(), key=lambda row: row[1], reverse=True)
-        if float(value) > 0.0
-    ]
-    negatives = [
-        labels[channel]
-        for channel, value in sorted(item.kpi_deltas.items(), key=lambda row: row[1])
-        if float(value) < 0.0
-    ]
     linked_accounts = [
         accounts_by_id[account_id].company_name
         for account_id in item.beneficiary_account_ids
         if account_id in accounts_by_id
     ][:2]
-    summary_parts: list[str] = []
-    if positives and negatives:
-        summary_parts.append(f"Primary visible upside: {positives[0]}, with a trade-off on {negatives[0]}.")
-    elif len(positives) >= 2:
-        summary_parts.append(f"Primary visible upside: {positives[0]} and {positives[1]}.")
-    elif positives:
-        summary_parts.append(f"Primary visible upside: {positives[0]}.")
-    elif negatives:
-        summary_parts.append(f"This is mostly defensive, with visible downside on {negatives[0]}.")
-    if item.beneficiary_segments:
-        summary_parts.append(
-            "Best fit for "
-            + ", ".join(segment.replace("_", " ") for segment in item.beneficiary_segments[:2])
-            + "."
+    summary_parts: list[str] = [
+        build_public_impact_summary(
+            item_id=item.item_id,
+            title=item.title,
+            kpi_deltas=item.kpi_deltas,
+            beneficiary_segments=item.beneficiary_segments,
+            beneficiary_account_names=linked_accounts,
+            lag_steps=item.lag_steps,
+            implementation_risk=item.implementation_risk,
+            policy_tags=item.policy_tags,
+            delivery_note=item.delivery_note,
         )
-    if linked_accounts:
-        summary_parts.append("Most visible account exposure: " + ", ".join(linked_accounts) + ".")
+    ]
     prerequisite_titles = [
         backlog_by_id[item_id].title
         for item_id in item.requires_item_ids
         if item_id in backlog_by_id
     ][:2]
     if prerequisite_titles:
-        summary_parts.append("Visible prerequisite: " + ", ".join(prerequisite_titles) + ".")
+        summary_parts.append("Works best after " + ", ".join(prerequisite_titles) + ".")
     synergy_titles = [
         backlog_by_id[item_id].title
         for item_id in item.synergy_item_ids
         if item_id in backlog_by_id
     ][:2]
     if synergy_titles:
-        summary_parts.append("Combines visibly well with " + ", ".join(synergy_titles) + ".")
+        summary_parts.append("Pairs naturally with " + ", ".join(synergy_titles) + ".")
     conflict_titles = [
         backlog_by_id[item_id].title
         for item_id in item.conflicts_with_ids
         if item_id in backlog_by_id
     ][:1]
     if conflict_titles:
-        summary_parts.append("Avoid pairing with " + ", ".join(conflict_titles) + ".")
+        summary_parts.append("Creates visible overlap or sequencing tension with " + ", ".join(conflict_titles) + ".")
     if family_size > 1:
-        summary_parts.append("Alternative execution path in the same initiative family; usually choose at most one variant.")
+        summary_parts.append("This is one execution path within a shared initiative family; usually choose at most one variant.")
     return " ".join(summary_parts)
 
 

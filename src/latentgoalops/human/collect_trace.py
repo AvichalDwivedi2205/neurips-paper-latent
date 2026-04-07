@@ -75,8 +75,8 @@ def _task2_action(observation) -> LatentGoalOpsAction:
         if item.conflicts_with_ids:
             extras.append(f"conflicts={','.join(item.conflicts_with_ids)}")
         print(
-            f"- {item.item_id} | cost={item.cost} | kind={item.kind} | "
-            f"impact={item.impact_summary or item.kpi_deltas} {' '.join(extras)}"
+            f"- {item.item_id} | cost={item.cost} | "
+            f"impact={item.impact_summary or ''} {' '.join(extras)}"
         )
         if item.risk_notes:
             print(f"  notes: {' | '.join(item.risk_notes)}")
@@ -95,8 +95,8 @@ def _task4_action(observation) -> LatentGoalOpsAction:
     print("\nTask 4 capital programs:")
     for item in observation.backlog:
         print(
-            f"- {item.item_id} | kind={item.kind} | alloc_max={item.allocation_max} | "
-            f"saturation={item.saturation_point} | impact={item.impact_summary or item.kpi_deltas}"
+            f"- {item.item_id} | alloc_max={item.allocation_max} | "
+            f"saturation={item.saturation_point} | impact={item.impact_summary or ''}"
         )
         if item.risk_notes:
             print(f"  notes: {' | '.join(item.risk_notes)}")
@@ -121,8 +121,8 @@ def _task7_action(observation) -> LatentGoalOpsAction:
     print(f"\n{observation.sim_day_label} hiring programs:")
     for item in observation.backlog:
         print(
-            f"- {item.item_id} | kind={item.kind} | alloc_max={item.allocation_max} | "
-            f"saturation={item.saturation_point} | impact={item.impact_summary or item.kpi_deltas}"
+            f"- {item.item_id} | alloc_max={item.allocation_max} | "
+            f"saturation={item.saturation_point} | impact={item.impact_summary or ''}"
         )
         if item.risk_notes:
             print(f"  notes: {' | '.join(item.risk_notes)}")
@@ -158,8 +158,8 @@ def _task3_like_action(observation, task_id: TaskId) -> LatentGoalOpsAction:
         if item.synergy_item_ids:
             extras.append(f"synergy={','.join(item.synergy_item_ids)}")
         print(
-            f"- {item.item_id} | cost={item.cost} | kind={item.kind} | "
-            f"impact={item.impact_summary or item.kpi_deltas} {' '.join(extras)}"
+            f"- {item.item_id} | cost={item.cost} | "
+            f"impact={item.impact_summary or ''} {' '.join(extras)}"
         )
         if item.risk_notes:
             print(f"  notes: {' | '.join(item.risk_notes)}")

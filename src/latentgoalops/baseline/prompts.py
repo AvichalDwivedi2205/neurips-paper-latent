@@ -413,7 +413,6 @@ def _compact_task2_observation(observation: dict) -> dict:
                 "item_id": item.get("item_id"),
                 "initiative_family": _initiative_family(item.get("item_id")),
                 "family_variant_count": family_counts.get(_initiative_family(item.get("item_id")), 1),
-                "kind": item.get("kind"),
                 "cost": item.get("cost"),
                 "impact_summary": item.get("impact_summary"),
                 "beneficiary_segments": item.get("beneficiary_segments", []),
@@ -460,7 +459,6 @@ def _compact_task4_observation(observation: dict) -> dict:
         "backlog": [
             {
                 "item_id": item.get("item_id"),
-                "kind": item.get("kind"),
                 "allocation_unit": item.get("allocation_unit"),
                 "allocation_max": item.get("allocation_max"),
                 "saturation_point": item.get("saturation_point"),
@@ -559,7 +557,6 @@ def _compact_task7_observation(observation: dict) -> dict:
         "backlog": [
             {
                 "item_id": item.get("item_id"),
-                "kind": item.get("kind"),
                 "allocation_unit": item.get("allocation_unit"),
                 "allocation_max": item.get("allocation_max"),
                 "saturation_point": item.get("saturation_point"),
@@ -680,7 +677,6 @@ def _compact_task3_observation(observation: dict) -> dict:
         "backlog": [
             {
                 "item_id": item.get("item_id"),
-                "kind": item.get("kind"),
                 "cost": item.get("cost"),
                 "impact_summary": item.get("impact_summary"),
                 "beneficiary_segments": item.get("beneficiary_segments", []),
@@ -746,7 +742,6 @@ def _compact_task5_observation(observation: dict) -> dict:
         "backlog": [
             {
                 "item_id": item.get("item_id"),
-                "kind": item.get("kind"),
                 "cost": item.get("cost"),
                 "impact_summary": item.get("impact_summary"),
                 "beneficiary_segments": item.get("beneficiary_segments", []),

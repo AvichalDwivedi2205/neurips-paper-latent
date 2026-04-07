@@ -294,6 +294,65 @@ class DecisionLedgerEntry(BaseModel):
     governance_flags: list[str] = Field(default_factory=list)
 
 
+class PublicInitiativeItem(BaseModel):
+    """Redacted initiative surface shown to agents and human evaluators."""
+
+    item_id: str
+    title: str
+    description: str
+    cost: float
+    uncertainty_band: float = 0.0
+    stakeholder_tag: str = "ops"
+    lag_steps: int = 1
+    effect_window: int = 1
+    delivery_note: str | None = None
+    beneficiary_segments: list[str] = Field(default_factory=list)
+    beneficiary_account_ids: list[str] = Field(default_factory=list)
+    implementation_risk: float = 0.0
+    policy_tags: list[str] = Field(default_factory=list)
+    requires_item_ids: list[str] = Field(default_factory=list)
+    conflicts_with_ids: list[str] = Field(default_factory=list)
+    synergy_item_ids: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+    allocation_unit: float | None = None
+    allocation_max: float | None = None
+    saturation_point: float | None = None
+    impact_summary: str | None = None
+
+
+class PublicTemporalEffectRecord(BaseModel):
+    """Redacted temporal consequence record for public observations."""
+
+    effect_id: str
+    decision_id: str | None = None
+    source_type: str
+    source_id: str
+    summary: str
+    affected_account_ids: list[str] = Field(default_factory=list)
+    affected_team_ids: list[str] = Field(default_factory=list)
+    scheduled_for_step: int
+    scheduled_for_date: str
+    realized_step: int | None = None
+    realized_date: str | None = None
+
+
+class PublicDecisionLedgerEntry(BaseModel):
+    """Redacted decision record exposed in public observations."""
+
+    decision_id: str
+    step_index: int
+    sim_date: str
+    chosen_initiatives: list[str] = Field(default_factory=list)
+    messaging_action: MessagingAction | None = None
+    pricing_change_pct: float | None = None
+    support_policy: SupportPolicy | None = None
+    rationale: str | None = None
+    scheduled_effect_ids: list[str] = Field(default_factory=list)
+    realized_effect_ids: list[str] = Field(default_factory=list)
+    observed_alerts: list[str] = Field(default_factory=list)
+    governance_flags: list[str] = Field(default_factory=list)
+
+
 class SimCalendarEvent(BaseModel):
     """Visible calendar marker for the startup simulator."""
 
@@ -511,7 +570,7 @@ class LatentGoalOpsObservation(Observation):
     narrative: str | None = None
     dashboard: DashboardState = Field(default_factory=DashboardState)
     inbox: list[InboxItem] = Field(default_factory=list)
-    backlog: list[InitiativeItem] = Field(default_factory=list)
+    backlog: list[PublicInitiativeItem] = Field(default_factory=list)
     accounts: list[CustomerAccount] = Field(default_factory=list)
     stakeholders: list[StakeholderPersona] = Field(default_factory=list)
     teams: list[InternalTeamState] = Field(default_factory=list)
@@ -520,9 +579,9 @@ class LatentGoalOpsObservation(Observation):
     governance_constraints: list[GovernanceConstraint] = Field(default_factory=list)
     alerts: list[str] = Field(default_factory=list)
     calendar_events: list[SimCalendarEvent] = Field(default_factory=list)
-    decision_ledger: list[DecisionLedgerEntry] = Field(default_factory=list)
-    pending_effects: list[TemporalEffectRecord] = Field(default_factory=list)
-    realized_effects: list[TemporalEffectRecord] = Field(default_factory=list)
+    decision_ledger: list[PublicDecisionLedgerEntry] = Field(default_factory=list)
+    pending_effects: list[PublicTemporalEffectRecord] = Field(default_factory=list)
+    realized_effects: list[PublicTemporalEffectRecord] = Field(default_factory=list)
     budget_remaining: float = 0.0
     capacity_remaining: float = 0.0
     sprint_budget: float | None = None

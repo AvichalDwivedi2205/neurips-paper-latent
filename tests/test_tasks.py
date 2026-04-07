@@ -75,7 +75,8 @@ def test_task2_public_backlog_redacts_exact_kpi_deltas():
     env = LatentGoalOpsEnvironment()
     observation = env.reset(seed=10, task_id="task2_roadmap_priority")
     assert observation.backlog
-    assert all(item.kpi_deltas == {} for item in observation.backlog)
+    assert all("kpi_deltas" not in item.model_dump(mode="json") for item in observation.backlog)
+    assert all("kind" not in item.model_dump(mode="json") for item in observation.backlog)
     assert all(item.impact_summary for item in observation.backlog)
 
 
@@ -85,9 +86,9 @@ def test_task2_summaries_surface_visible_portfolio_paths():
     summaries = [item.impact_summary for item in observation.backlog]
     assert any(
         summary and (
-            "Visible prerequisite:" in summary
-            or "Combines visibly well with" in summary
-            or "Avoid pairing with" in summary
+            "Works best after" in summary
+            or "Pairs naturally with" in summary
+            or "Creates visible overlap or sequencing tension" in summary
         )
         for summary in summaries
     )
@@ -220,9 +221,11 @@ def test_task3_public_effects_and_ledger_redact_internal_deltas():
     env = LatentGoalOpsEnvironment()
     observation = env.reset(seed=11, task_id="task3_startup_week")
     observation = env.step(env.sample_random_action())
-    assert all(effect.channel_deltas == {} and effect.dashboard_deltas == {} for effect in observation.pending_effects)
-    assert all(effect.channel_deltas == {} and effect.dashboard_deltas == {} for effect in observation.realized_effects)
-    assert all(entry.expected_channels == {} for entry in observation.decision_ledger)
+    assert all("channel_deltas" not in effect.model_dump(mode="json") for effect in observation.pending_effects)
+    assert all("dashboard_deltas" not in effect.model_dump(mode="json") for effect in observation.pending_effects)
+    assert all("channel_deltas" not in effect.model_dump(mode="json") for effect in observation.realized_effects)
+    assert all("dashboard_deltas" not in effect.model_dump(mode="json") for effect in observation.realized_effects)
+    assert all("expected_channels" not in entry.model_dump(mode="json") for entry in observation.decision_ledger)
 
 
 def test_task3_sparse_reward_only_pays_on_terminal_step():
@@ -298,7 +301,7 @@ def test_task2_visible_only_heuristic_operates_on_redacted_payload():
     observation = env.reset(seed=10, task_id="task2_roadmap_priority")
     payload = observation.model_dump(mode="json")
     assert payload["backlog"]
-    assert all(item["kpi_deltas"] == {} for item in payload["backlog"])
+    assert all("kpi_deltas" not in item and "kind" not in item for item in payload["backlog"])
     goal_hint = env._infer_goal_hint_from_evidence(" ".join(observation.stakeholder_notes))  # noqa: SLF001
     selected_ids = env._visible_select_task2_bundle(payload, env._goal_hint_weights(goal_hint))  # noqa: SLF001
     assert isinstance(selected_ids, list)

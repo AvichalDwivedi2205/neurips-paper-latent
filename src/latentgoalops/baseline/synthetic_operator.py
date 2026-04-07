@@ -6,6 +6,7 @@ import random
 from dataclasses import asdict, dataclass
 
 from latentgoalops.models import LatentGoalOpsAction, SupportPolicy, TaskId
+from latentgoalops.server.public_reasoning import visible_item_proxy
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,24 +141,15 @@ TASK_SHORTLISTS = {
 }
 
 
-def _visible_deltas(item: dict) -> dict[str, float]:
-    deltas = item.get("kpi_deltas", {}) or {}
-    if deltas:
-        return {channel: float(value) for channel, value in deltas.items()}
-    proxy = {"growth": 0.0, "retention": 0.0, "revenue": 0.0, "efficiency": 0.0}
-    kind = str(item.get("kind", "growth"))
-    if kind in proxy:
-        proxy[kind] = 0.05
-    impact_summary = str(item.get("impact_summary", "")).lower()
-    if "trade-offs on activation and demand" in impact_summary:
-        proxy["growth"] -= 0.015
-    if "trade-offs on renewal stability and trust" in impact_summary:
-        proxy["retention"] -= 0.015
-    if "trade-offs on monetization and expansion" in impact_summary:
-        proxy["revenue"] -= 0.015
-    if "trade-offs on cost-to-serve and delivery discipline" in impact_summary:
-        proxy["efficiency"] -= 0.015
-    return proxy
+def _accounts_by_id(observation: dict) -> dict[str, dict]:
+    return {
+        str(account.get("account_id")): account
+        for account in observation.get("accounts", [])
+    }
+
+
+def _visible_deltas(item: dict, accounts_by_id: dict[str, dict] | None = None) -> dict[str, float]:
+    return visible_item_proxy(item, accounts_by_id=accounts_by_id)
 
 
 def operator_style_choices() -> list[str]:
@@ -174,8 +166,8 @@ def resolve_operator_persona(style: str, seed: int, task_id: TaskId) -> Operator
     return PERSONAS[rng.choice(shortlist)]
 
 
-def _task2_item_score(item: dict, persona: OperatorPersona) -> float:
-    deltas = _visible_deltas(item)
+def _task2_item_score(item: dict, persona: OperatorPersona, accounts_by_id: dict[str, dict] | None = None) -> float:
+    deltas = _visible_deltas(item, accounts_by_id)
     if persona.default_focus == "retention":
         weights = {"growth": 0.5, "retention": 1.4, "revenue": 0.7, "efficiency": 0.6}
     elif persona.default_focus == "efficiency_revenue":
@@ -192,9 +184,9 @@ def _task2_item_score(item: dict, persona: OperatorPersona) -> float:
     return (weighted_gain + segment_bonus + account_bonus - risk_penalty) / cost
 
 
-def _task2_proxy_item_value(item: dict) -> float:
+def _task2_proxy_item_value(item: dict, accounts_by_id: dict[str, dict] | None = None) -> float:
     """Visible-only proxy value used to keep the submission baseline stable."""
-    deltas = _visible_deltas(item)
+    deltas = _visible_deltas(item, accounts_by_id)
     weighted_gain = (
         max(0.0, float(deltas.get("growth", 0.0))) * 0.95
         + max(0.0, float(deltas.get("retention", 0.0))) * 1.15
@@ -210,6 +202,7 @@ def _task2_proxy_item_value(item: dict) -> float:
 def _task2_proxy_bundle_score(selected_item_ids: list[str], observation: dict) -> float:
     """Approximate visible bundle quality without using hidden goal state."""
     backlog = observation.get("backlog", [])
+    accounts_by_id = _accounts_by_id(observation)
     budget = float(observation.get("sprint_budget") or 0.0)
     chosen = {
         item.get("item_id"): item
@@ -224,8 +217,10 @@ def _task2_proxy_bundle_score(selected_item_ids: list[str], observation: dict) -
         return -1.0
 
     score = 0.0
+    focus_support = {"growth": 0.0, "retention": 0.0, "revenue": 0.0, "efficiency": 0.0}
     for item in chosen.values():
-        base = _task2_proxy_item_value(item)
+        proxy = _visible_deltas(item, accounts_by_id)
+        base = _task2_proxy_item_value(item, accounts_by_id)
         if item.get("requires_item_ids") and not any(
             required in chosen for required in item.get("requires_item_ids", [])
         ):
@@ -235,6 +230,8 @@ def _task2_proxy_bundle_score(selected_item_ids: list[str], observation: dict) -
         ):
             base *= 1.10
         score += base
+        for channel, value in proxy.items():
+            focus_support[channel] += max(0.0, float(value))
 
     conflict_penalty = 0.0
     for item in chosen.values():
@@ -242,14 +239,17 @@ def _task2_proxy_bundle_score(selected_item_ids: list[str], observation: dict) -
         for conflict_id in item.get("conflicts_with_ids", []):
             if conflict_id in chosen and str(item_id) < str(conflict_id):
                 conflict_penalty += 0.18 * min(
-                    _task2_proxy_item_value(item),
-                    _task2_proxy_item_value(chosen[conflict_id]),
+                    _task2_proxy_item_value(item, accounts_by_id),
+                    _task2_proxy_item_value(chosen[conflict_id], accounts_by_id),
                 )
 
     execution_penalty = sum(float(item.get("implementation_risk", 0.0)) * 0.03 for item in chosen.values())
     budget_use = (spent_budget / budget) if budget > 0.0 else 1.0
     budget_bonus = 0.03 * max(0.0, min(1.0, budget_use))
-    concentration_bonus = 0.02 if len({item.get("kind") for item in chosen.values()}) == 1 else 0.0
+    concentration_bonus = 0.0
+    total_focus = sum(focus_support.values())
+    if total_focus > 0.0 and max(focus_support.values()) / total_focus >= 0.55:
+        concentration_bonus = 0.02
     return max(0.0, score - conflict_penalty - execution_penalty + budget_bonus + concentration_bonus)
 
 
@@ -290,6 +290,7 @@ def apply_operator_guardrails(
 
     if action.task_id == TaskId.TASK2:
         backlog = observation.get("backlog", [])
+        accounts_by_id = _accounts_by_id(observation)
         visible_ids = {item.get("item_id") for item in observation.get("backlog", [])}
         selected_item_ids = [
             item_id for item_id in action.selected_item_ids if item_id in visible_ids
@@ -299,7 +300,11 @@ def apply_operator_guardrails(
         spent_budget = sum(cost_by_id.get(item_id, 0.0) for item_id in selected_item_ids)
         if backlog and sprint_budget > 0 and spent_budget < 0.6 * sprint_budget:
             used = set(selected_item_ids)
-            ranked = sorted(backlog, key=lambda item: _task2_item_score(item, persona), reverse=True)
+            ranked = sorted(
+                backlog,
+                key=lambda item: _task2_item_score(item, persona, accounts_by_id),
+                reverse=True,
+            )
             for item in ranked:
                 item_id = item.get("item_id")
                 if item_id in used:

@@ -25,9 +25,18 @@ from latentgoalops.models import (
     LatentGoalOpsObservation,
     LatentGoalOpsState,
     MessagingAction,
+    PublicDecisionLedgerEntry,
+    PublicInitiativeItem,
+    PublicTemporalEffectRecord,
     SupportPolicy,
     TaskDescriptor,
     TaskId,
+)
+from latentgoalops.server.public_reasoning import (
+    build_public_impact_summary,
+    dominant_visible_focus,
+    infer_goal_hint_from_evidence,
+    visible_item_proxy,
 )
 from latentgoalops.server.config import load_config
 from latentgoalops.server.grader import (
@@ -168,63 +177,87 @@ class LatentGoalOpsEnvironment(
     @staticmethod
     def _infer_goal_hint_from_evidence(evidence: str) -> str:
         """Infer a rough visible objective from narrative evidence only."""
-        lowered = evidence.lower()
-        if any(
-            keyword in lowered
-            for keyword in ("renewal", "account health", "trust", "support backlog", "fragile", "account stability")
-        ):
-            return "retention"
-        if any(
-            keyword in lowered
-            for keyword in ("pricing", "monetization", "board", "commercial", "pipeline", "commercial capture")
-        ):
-            return "revenue"
-        if any(
-            keyword in lowered
-            for keyword in ("margin", "latency", "cost-to-serve", "ops", "runway discipline", "operating leverage")
-        ):
-            return "efficiency"
-        return "growth"
+        return infer_goal_hint_from_evidence(evidence)
 
-    @staticmethod
-    def _impact_summary(kpi_deltas: dict[str, float]) -> str:
-        channel_labels = {
-            "growth": "new-logo momentum",
-            "retention": "account stability",
-            "revenue": "commercial capture",
-            "efficiency": "operating leverage",
-        }
-        positives = [
-            channel_labels[channel]
-            for channel, value in sorted(kpi_deltas.items(), key=lambda row: row[1], reverse=True)
-            if float(value) > 0.0
-        ]
-        negatives = [
-            channel_labels[channel]
-            for channel, value in sorted(kpi_deltas.items(), key=lambda row: row[1])
-            if float(value) < 0.0
-        ]
-        if positives and negatives:
-            return f"Visible upside is strongest on {positives[0]}, with trade-offs on {negatives[0]}."
-        if len(positives) >= 2:
-            return f"Visible upside is strongest on {positives[0]} and {positives[1]}."
-        if positives:
-            return f"Visible upside is strongest on {positives[0]}."
-        if negatives:
-            return f"This looks mostly defensive, with visible trade-offs on {negatives[0]}."
-        return "The visible upside is mixed and depends heavily on sequencing and rollout quality."
+    def _impact_summary(self, item) -> str:
+        account_names = []
+        if self._episode is not None:
+            accounts_by_id = {account.account_id: account for account in self._episode.get("accounts", [])}
+            account_names = [
+                accounts_by_id[account_id].company_name
+                for account_id in item.beneficiary_account_ids
+                if account_id in accounts_by_id
+            ][:2]
+        return build_public_impact_summary(
+            item_id=item.item_id,
+            title=item.title,
+            kpi_deltas=item.kpi_deltas,
+            beneficiary_segments=item.beneficiary_segments,
+            beneficiary_account_names=account_names,
+            lag_steps=item.lag_steps,
+            implementation_risk=item.implementation_risk,
+            policy_tags=item.policy_tags,
+            delivery_note=item.delivery_note,
+        )
 
     def _public_initiative_view(self, item) -> object:
-        impact_summary = item.impact_summary or self._impact_summary(item.kpi_deltas)
-        return item.model_copy(update={"kpi_deltas": {}, "impact_summary": impact_summary}, deep=True)
+        impact_summary = item.impact_summary if self._task_id == TaskId.TASK2 and item.impact_summary else self._impact_summary(item)
+        return PublicInitiativeItem(
+            item_id=item.item_id,
+            title=item.title,
+            description=item.description,
+            cost=item.cost,
+            uncertainty_band=item.uncertainty_band,
+            stakeholder_tag=item.stakeholder_tag,
+            lag_steps=item.lag_steps,
+            effect_window=item.effect_window,
+            delivery_note=item.delivery_note,
+            beneficiary_segments=list(item.beneficiary_segments),
+            beneficiary_account_ids=list(item.beneficiary_account_ids),
+            implementation_risk=item.implementation_risk,
+            policy_tags=list(item.policy_tags),
+            requires_item_ids=list(item.requires_item_ids),
+            conflicts_with_ids=list(item.conflicts_with_ids),
+            synergy_item_ids=list(item.synergy_item_ids),
+            risk_notes=list(item.risk_notes),
+            allocation_unit=item.allocation_unit,
+            allocation_max=item.allocation_max,
+            saturation_point=item.saturation_point,
+            impact_summary=impact_summary,
+        )
 
     @staticmethod
     def _public_effect_view(effect) -> object:
-        return effect.model_copy(update={"channel_deltas": {}, "dashboard_deltas": {}}, deep=True)
+        return PublicTemporalEffectRecord(
+            effect_id=effect.effect_id,
+            decision_id=effect.decision_id,
+            source_type=effect.source_type,
+            source_id=effect.source_id,
+            summary=effect.summary,
+            affected_account_ids=list(effect.affected_account_ids),
+            affected_team_ids=list(effect.affected_team_ids),
+            scheduled_for_step=effect.scheduled_for_step,
+            scheduled_for_date=effect.scheduled_for_date,
+            realized_step=effect.realized_step,
+            realized_date=effect.realized_date,
+        )
 
     @staticmethod
     def _public_decision_view(entry) -> object:
-        return entry.model_copy(update={"expected_channels": {}}, deep=True)
+        return PublicDecisionLedgerEntry(
+            decision_id=entry.decision_id,
+            step_index=entry.step_index,
+            sim_date=entry.sim_date,
+            chosen_initiatives=list(entry.chosen_initiatives),
+            messaging_action=entry.messaging_action,
+            pricing_change_pct=entry.pricing_change_pct,
+            support_policy=entry.support_policy,
+            rationale=entry.rationale,
+            scheduled_effect_ids=list(entry.scheduled_effect_ids),
+            realized_effect_ids=list(entry.realized_effect_ids),
+            observed_alerts=list(entry.observed_alerts),
+            governance_flags=list(entry.governance_flags),
+        )
 
     def reset(
         self,
@@ -1269,38 +1302,16 @@ class LatentGoalOpsEnvironment(
 
     @staticmethod
     def _visible_channel_proxy(item: dict[str, Any]) -> dict[str, float]:
-        labels = {
-            "growth": "new-logo momentum",
-            "retention": "account stability",
-            "revenue": "commercial capture",
-            "efficiency": "operating leverage",
-        }
-        proxy = {channel: 0.0 for channel in CHANNELS}
-        kind = str(item.get("kind", "growth"))
-        if kind in proxy:
-            proxy[kind] += 0.05
-
-        impact_summary = str(item.get("impact_summary", "")).lower()
-        for channel, label in labels.items():
-            if f"trade-offs on {label}" in impact_summary:
-                proxy[channel] -= 0.02
-            elif label in impact_summary:
-                proxy[channel] += 0.02
-
-        notes = " ".join(str(note).lower() for note in item.get("risk_notes", []))
-        if any(keyword in notes for keyword in ("renewal", "trust", "sla", "support")):
-            proxy["retention"] += 0.01
-        if any(keyword in notes for keyword in ("pricing", "commercial", "monetization", "procurement")):
-            proxy["revenue"] += 0.01
-        if any(keyword in notes for keyword in ("margin", "cost", "infra", "efficiency", "reliability")):
-            proxy["efficiency"] += 0.01
-        if any(keyword in notes for keyword in ("activation", "demand", "onboarding", "referral")):
-            proxy["growth"] += 0.01
-        return proxy
+        return visible_item_proxy(item)
 
     @classmethod
-    def _visible_item_alignment(cls, item: dict[str, Any], goal_weights: dict[str, float]) -> float:
-        proxy = cls._visible_channel_proxy(item)
+    def _visible_item_alignment(
+        cls,
+        item: dict[str, Any],
+        goal_weights: dict[str, float],
+        accounts_by_id: dict[str, dict[str, Any]] | None = None,
+    ) -> float:
+        proxy = visible_item_proxy(item, accounts_by_id=accounts_by_id)
         alignment = sum(proxy[channel] * goal_weights[channel] for channel in CHANNELS)
         alignment += 0.004 * min(len(item.get("beneficiary_segments", [])), 3)
         alignment += 0.004 * min(len(item.get("beneficiary_account_ids", [])), 3)
@@ -1315,6 +1326,10 @@ class LatentGoalOpsEnvironment(
         goal_weights: dict[str, float],
     ) -> float:
         backlog = {str(item.get("item_id")): item for item in observation.get("backlog", [])}
+        accounts_by_id = {
+            str(account.get("account_id")): account
+            for account in observation.get("accounts", [])
+        }
         chosen = {
             item_id: backlog[item_id]
             for item_id in selected_item_ids
@@ -1336,8 +1351,10 @@ class LatentGoalOpsEnvironment(
         utilities: dict[str, float] = {}
         synergy_bonus = 0.0
         dependency_coverage = 0
+        focus_support = {channel: 0.0 for channel in CHANNELS}
         for item_id, item in chosen.items():
-            utility = cls._visible_item_alignment(item, goal_weights)
+            proxy = visible_item_proxy(item, accounts_by_id=accounts_by_id)
+            utility = cls._visible_item_alignment(item, goal_weights, accounts_by_id)
             if item.get("requires_item_ids") and not any(
                 required in chosen for required in item.get("requires_item_ids", [])
             ):
@@ -1350,6 +1367,8 @@ class LatentGoalOpsEnvironment(
                 utility *= 1.10
             utilities[item_id] = utility
             score += utility
+            for channel, value in proxy.items():
+                focus_support[channel] += max(0.0, float(value))
 
         for item_id, item in chosen.items():
             for synergy_id in item.get("synergy_item_ids", []):
@@ -1365,8 +1384,13 @@ class LatentGoalOpsEnvironment(
         spend_ratio = spent_budget / max(budget_limit, 1.0) if budget_limit > 0.0 else 1.0
         if budget_limit > 0.0:
             score += 0.03 * min(1.0, spent_budget / budget_limit)
-        if len({str(item.get("kind", "growth")) for item in chosen.values()}) == 1:
-            score += 0.02
+        total_focus = sum(focus_support.values())
+        if total_focus > 0.0:
+            dominant_share = max(focus_support.values()) / total_focus
+            if dominant_share >= 0.55:
+                score += 0.02
+            elif len(chosen) >= 4 and dominant_share < 0.38:
+                score -= 0.02
         if len(chosen) >= 4 and spend_ratio >= 0.72:
             score += 0.05
         if dependency_coverage > 0:
@@ -1406,6 +1430,10 @@ class LatentGoalOpsEnvironment(
         goal_weights: dict[str, float],
     ) -> float:
         backlog = {str(item.get("item_id")): item for item in observation.get("backlog", [])}
+        accounts_by_id = {
+            str(account.get("account_id")): account
+            for account in observation.get("accounts", [])
+        }
         budget_limit = int(round(float(
             observation.get("budget_remaining")
             or observation.get("sprint_budget")
@@ -1434,12 +1462,13 @@ class LatentGoalOpsEnvironment(
 
         score = 0.0
         risk_penalty = 0.0
-        allocated_by_kind: dict[str, float] = {}
+        allocated_focus: dict[str, float] = {channel: 0.0 for channel in CHANNELS}
         utilities: dict[str, float] = {}
         for item_id, (item, amount) in chosen.items():
             saturation = float(item.get("saturation_point", amount) or amount)
             effective_units = amount if amount <= saturation else saturation + 0.55 * (amount - saturation)
-            utility = cls._visible_item_alignment(item, goal_weights)
+            proxy = visible_item_proxy(item, accounts_by_id=accounts_by_id)
+            utility = cls._visible_item_alignment(item, goal_weights, accounts_by_id)
             if item.get("requires_item_ids") and not any(
                 required in chosen for required in item.get("requires_item_ids", [])
             ):
@@ -1451,10 +1480,8 @@ class LatentGoalOpsEnvironment(
             utilities[item_id] = utility * effective_units
             score += utilities[item_id]
             risk_penalty += float(item.get("implementation_risk", 0.0) or 0.0) * 0.016 * amount
-            allocated_by_kind[str(item.get("kind", "growth"))] = allocated_by_kind.get(
-                str(item.get("kind", "growth")),
-                0.0,
-            ) + amount
+            for channel, value in proxy.items():
+                allocated_focus[channel] += max(0.0, float(value)) * amount
 
         for item_id, (item, _) in chosen.items():
             for conflict_id in item.get("conflicts_with_ids", []):
@@ -1465,14 +1492,14 @@ class LatentGoalOpsEnvironment(
         score -= risk_penalty
         score -= 0.020 * max(0, len(chosen) - 4)
         total_allocated = sum(amount for _, amount in chosen.values())
-        funded_kind_count = len(allocated_by_kind)
-        if funded_kind_count >= 3:
-            score -= 0.045 * (funded_kind_count - 2)
-        if total_allocated > 0.0:
-            dominant_share = max(allocated_by_kind.values()) / total_allocated
+        active_focuses = sum(1 for value in allocated_focus.values() if value > 0.05)
+        if active_focuses >= 3:
+            score -= 0.045 * (active_focuses - 2)
+        if total_allocated > 0.0 and max(allocated_focus.values(), default=0.0) > 0.0:
+            dominant_share = max(allocated_focus.values()) / sum(allocated_focus.values())
             if dominant_share >= 0.55:
                 score += 0.05
-            elif funded_kind_count >= 3 and dominant_share < 0.45:
+            elif active_focuses >= 3 and dominant_share < 0.45:
                 score -= 0.06
         return score
 
@@ -1580,6 +1607,10 @@ class LatentGoalOpsEnvironment(
             for item_id in selected_item_ids
             if item_id in backlog
         ]
+        accounts_by_id = {
+            str(account.get("account_id")): account
+            for account in observation.get("accounts", [])
+        }
         spent_budget = sum(float(item.get("cost", 0.0) or 0.0) for item in chosen_items)
         budget_limit = float(observation.get("budget_remaining") or 0.0)
         if budget_limit > 0.0 and spent_budget > budget_limit + 1e-9:
@@ -1620,29 +1651,37 @@ class LatentGoalOpsEnvironment(
             score -= 0.08
         if high_touch_accounts and pricing_change_pct > 0.02 and "pricing_guardrail" in visible_constraint_ids:
             score -= 0.09
+        item_focus_support = {channel: 0.0 for channel in CHANNELS}
+        for item in chosen_items:
+            proxy = visible_item_proxy(item, accounts_by_id=accounts_by_id)
+            for channel, value in proxy.items():
+                item_focus_support[channel] += max(0.0, float(value))
+
         if (
             float(observation.get("dashboard", {}).get("ops_margin", 0.0) or 0.0) <= 0.32
             and support_policy == SupportPolicy.PREMIUM_SLA
-            and any(str(item.get("kind", "")) == "growth" for item in chosen_items)
+            and item_focus_support["growth"] >= item_focus_support["efficiency"]
             and "margin_guardrail" in visible_constraint_ids
         ):
             score -= 0.05
 
         if high_touch_accounts and (
             support_policy in {SupportPolicy.PREMIUM_SLA, SupportPolicy.INCIDENT_SWARM}
-            or any(str(item.get("kind", "")) == "retention" for item in chosen_items)
+            or item_focus_support["retention"] >= 0.05
         ):
             score += 0.02
         if float(observation.get("market_context", {}).get("board_pressure_level", 0.0) or 0.0) >= 0.68 and (
             messaging_action == MessagingAction.REVENUE_UPSELL
-            or any(str(item.get("kind", "")) == "revenue" for item in chosen_items)
+            or item_focus_support["revenue"] >= 0.05
         ):
             score += 0.015
 
         channel_support: dict[str, float] = {}
         for item in chosen_items:
-            kind = str(item.get("kind", "growth"))
-            channel_support[kind] = channel_support.get(kind, 0.0) + 1.0
+            proxy = visible_item_proxy(item, accounts_by_id=accounts_by_id)
+            focus = dominant_visible_focus(proxy)
+            if focus is not None:
+                channel_support[focus] = channel_support.get(focus, 0.0) + 1.0
         message_channel = {
             MessagingAction.GROWTH_PUSH: "growth",
             MessagingAction.RETENTION_CAMPAIGN: "retention",
