@@ -12,15 +12,16 @@ tags:
 
 # LatentGoalOps
 
-LatentGoalOps is a research-grade OpenEnv benchmark for hidden-objective inference in realistic startup operations. Instead of telling an agent what to optimize, the environment gives indirect clues through KPI dashboards, stakeholder messages, backlog options, and event noise. The agent must infer the business objective, choose coherent actions, and in the hard task recover from a silent mid-episode goal shift.
+LatentGoalOps is a research-grade OpenEnv benchmark for latent-goal inference and adaptation under non-stationary operational objectives. Instead of telling an agent what to optimize, the environment gives indirect clues through KPI dashboards, stakeholder messages, backlog options, and event noise. The agent must infer the business objective, choose coherent actions, and in the long-horizon tasks recover from a silent mid-episode goal shift.
 
 This repo implements:
 
 - Full OpenEnv-style `reset()`, `step()`, and `state()` support
 - Typed Pydantic `Action`, `Observation`, and `State` models
-- Five tasks with deterministic programmatic graders
+- Seven tasks with deterministic programmatic graders
 - Leakage-safe shaped rewards with partial progress signals
 - A resumable baseline harness with OpenAI-client calls against OpenAI-compatible endpoints such as DigitalOcean Gradient
+- A strict paper-eval mode that disables heuristic rescue and parse repair for clean model comparisons
 - A root [`inference.py`](inference.py) submission runner for the required hackathon baseline flow
 - Hugging Face Space metadata and Docker packaging
 
@@ -33,6 +34,8 @@ The benchmark models tasks that real startup operators and product teams actuall
 - Task 3: run a startup for a week under noisy and shifting business constraints
 - Task 4: allocate capital across nonlinear programs with diminishing returns
 - Task 5: assemble a crisis-response package from initiatives plus operating policies
+- Task 6: run an incident-response week with noisy evidence and delayed recovery effects
+- Task 7: plan quarterly headcount under shifting operational priorities
 
 This is not a toy game. The hidden goal changes how the same visible evidence should be interpreted, which makes the benchmark useful for agent evaluation rather than just schema following.
 
@@ -43,15 +46,20 @@ The latest version also adds a persistent synthetic startup world with:
 - team-state signals such as capacity, burnout, and execution reliability
 - market context and governance constraints that make some actions strategically unsafe
 
-## Hackathon Submission Profile
+## Benchmark Slices
 
-The environment ships with 5 tasks, but the submission baseline intentionally defaults to the 3 core tasks required by the hackathon:
+The environment now has two evaluation slices:
+
+- One-shot decision tasks: `task1`, `task2`, `task4`, `task5`
+- Long-horizon adaptation tasks: `task3`, `task6`, `task7`
+
+The legacy hackathon runner intentionally defaults to the 3 original tasks required by that submission flow:
 
 - `task1_feedback_triage`
 - `task2_roadmap_priority`
 - `task3_startup_week`
 
-This keeps the mandatory [`inference.py`](inference.py) runtime comfortably inside the submission budget while preserving the easy / medium / hard progression. Tasks 4 and 5 remain available in the environment for fuller benchmark runs.
+This keeps the mandatory [`inference.py`](inference.py) runtime comfortably inside the submission budget while preserving the easy / medium / hard progression. Full paper-style evaluations should use the dedicated baseline runners in strict paper-eval mode instead of the hackathon path.
 
 ## Environment API
 
