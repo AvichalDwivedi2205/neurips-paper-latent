@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-from latentgoalops.models import TaskId
+from latentgoalops.models import FeedbackLabel, MessagingAction, SupportPolicy, TaskId
 
 
 def _shared_system_prefix() -> str:
@@ -15,7 +15,7 @@ def _shared_system_prefix() -> str:
         "Your real task is not just to react locally, but to infer the latent business objective from indirect evidence "
         "such as KPI dashboards, stakeholder messages, backlog structure, alerts, and resource constraints. "
         "Maintain one coherent working hypothesis unless new evidence strongly contradicts it. "
-        "Do not explain your reasoning. Return exactly one JSON object and nothing else."
+        "Do not explain your reasoning. Return exactly one compact JSON object for the active task fields only and nothing else."
     )
 
 
@@ -29,7 +29,7 @@ def _operator_prefix(operator_profile: Any | None) -> str:
         f"Keep plans focused: roadmap <= {operator_profile.max_parallel_bets} items, startup initiatives <= {operator_profile.max_parallel_initiatives}, "
         f"pricing moves roughly within +/-{operator_profile.max_abs_pricing_change:.2f}. "
         "Prefer continuity, lower-regret choices, and careful handling of premium or renewal-risk accounts. "
-        "Do not explain hidden reasoning. Return exactly one JSON object and nothing else."
+        "Do not explain hidden reasoning. Return exactly one compact JSON object for the active task fields only and nothing else."
     )
 
 
@@ -40,11 +40,10 @@ def _task1_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
         "Use the hidden objective only to influence prioritization and escalation, never to change the underlying label semantics. "
         "Pay attention to account economics such as annual_contract_value, renewal_window_days, support_tier, and relationship_health. "
         "Allowed labels: bug, feature_request, churn_risk, praise, billing_issue, latency_complaint. "
-        "Output schema: "
+        "Do not include task_id or explanations. Output schema: "
         "{"
-        "\"task_id\":\"task1_feedback_triage\","
-        "\"labels\":[{\"item_id\":\"...\",\"label\":\"bug\"}],"
-        "\"priorities\":[{\"item_id\":\"...\",\"priority\":3}],"
+        "\"labels\":{\"item_id\":\"bug\"},"
+        "\"priorities\":{\"item_id\":3},"
         "\"escalate_ids\":[\"...\"]"
         "}."
     )
@@ -60,11 +59,9 @@ def _task2_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
         "Never exceed the budget. Under-spending is usually a visible mistake: unless conflicts or missing prerequisites clearly block you, "
         "aim to spend most of sprint_budget and usually choose roughly four to six mutually coherent items rather than a tiny two-item bundle. "
         "If uncertain, choose the highest visible KPI gain per unit cost that matches your inferred objective. "
-        "Output schema: "
+        "Do not include task_id or rationale text unless truly needed. Output schema: "
         "{"
-        "\"task_id\":\"task2_roadmap_priority\","
-        "\"selected_item_ids\":[\"...\"],"
-        "\"rationale_summary\":\"one short sentence\""
+        "\"selected\":[\"...\"]"
         "}."
     )
 
@@ -77,22 +74,18 @@ def _task3_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
         "manage a portfolio of customer accounts, recurring stakeholder agendas, team execution constraints, and governance guardrails, "
         "and adapt if the evidence suggests the objective has silently shifted. "
         "Avoid mixing growth, retention, revenue, and efficiency actions without a clear reason. Prefer plans whose delayed effects remain aligned over multiple days. "
-        "Use memory_focus to ask for the next retrieval bundle, memory_writes for short notes, and belief_report to emit your current posterior. "
+        "memory_focus, memory_writes, and belief_report are optional diagnostics: only include them when they materially help the next step. "
         "Choose only visible initiative IDs. Keep pricing_change_pct in [-0.20, 0.20]. "
         "Allowed messaging_action values: growth_push, retention_campaign, revenue_upsell, cost_comms, none. "
         "Allowed support_policy values: premium_sla, balanced_triage, automation_first, incident_swarm. "
-        "Output schema: "
+        "Do not include task_id. Omit optional fields you do not need. Prefer the minimal schema: "
         "{"
-        "\"task_id\":\"task3_startup_week\","
-        "\"chosen_initiatives\":[\"...\"],"
-        "\"messaging_action\":\"growth_push\","
-        "\"pricing_change_pct\":0.0,"
-        "\"support_policy\":\"balanced_triage\","
-        "\"rationale\":\"one short sentence\","
-        "\"memory_focus\":[{\"entity_ids\":[\"acct_1\"],\"tags\":[\"retention\"],\"lookback_steps\":4}],"
-        "\"memory_writes\":[{\"title\":\"note\",\"body\":\"short note\"}],"
-        "\"belief_report\":{\"archetype_probs\":{\"growth\":0.25,\"retention\":0.25,\"revenue\":0.25,\"efficiency\":0.25},\"shift_detected_confidence\":0.0}"
-        "}."
+        "\"chosen\":[\"...\"],"
+        "\"msg\":\"retention_campaign\","
+        "\"price\":0.0,"
+        "\"support\":\"balanced_triage\""
+        "}. "
+        "Only include focus, writes, or belief if they are short and materially useful."
     )
 
 
@@ -100,11 +93,19 @@ def _task6_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
     return (
         f"{_operator_prefix(operator_profile) if policy_mode == 'synthetic_operator' else _shared_system_prefix()} "
         "Task 6 is a multi-day incident response week. Track noisy evidence, delayed recovery effects, and open conflicts in memory while adapting to possible latent-goal shifts. "
-        "Prefer coherent recovery sequences over one-step KPI chasing. Use memory_focus, memory_writes, and belief_report explicitly. "
+        "Prefer coherent recovery sequences over one-step KPI chasing. "
+        "For strict evaluation, prioritize a short valid control payload over verbose bookkeeping: memory_focus, memory_writes, and belief_report are optional. "
         "Choose only visible initiative IDs. Keep pricing_change_pct in [-0.20, 0.20]. "
         "Allowed messaging_action values: growth_push, retention_campaign, revenue_upsell, cost_comms, none. "
         "Allowed support_policy values: premium_sla, balanced_triage, automation_first, incident_swarm. "
-        "Output schema mirrors task3, but task_id must be task6_incident_response_week."
+        "Do not include task_id. Prefer the minimal schema: "
+        "{"
+        "\"chosen\":[\"...\"],"
+        "\"msg\":\"retention_campaign\","
+        "\"price\":0.0,"
+        "\"support\":\"incident_swarm\""
+        "}. "
+        "Only include focus, writes, or belief if they are short and genuinely useful."
     )
 
 
@@ -114,12 +115,13 @@ def _task4_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
         "Task 4 is capital allocation under uncertainty. Allocate discrete budget points across visible program IDs using budget_allocations. "
         "Programs have visible allocation_max, saturation hints, dependencies, conflicts, and stakeholder pressure. "
         "Prefer one focused capital story rather than sprinkling tiny amounts across every program. "
+        "In most episodes, that means one anchor program and one or two enabling programs, usually with 2 to 4 funded IDs total rather than a five-program scattershot mix. "
+        "Use the visible renewal concentration, expansion upside, runway pressure, support strain, dependencies, and conflicts to decide which capital story actually fits the room. "
+        "If two programs visibly send conflicting strategic signals, do not fund both heavily. Spend most of the budget unless visible dependencies or conflicts make that unsafe. "
         "Never exceed the total budget. Use integer budget points only. "
-        "Output schema: "
+        "Do not include task_id or rationale text unless truly needed. Output schema: "
         "{"
-        "\"task_id\":\"task4_capital_allocation\","
-        "\"budget_allocations\":{\"program_id\":2},"
-        "\"rationale_summary\":\"one short sentence\""
+        "\"allocations\":{\"program_id\":2}"
         "}."
     )
 
@@ -127,16 +129,15 @@ def _task4_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
 def _task7_system_prompt(policy_mode: str = "model", operator_profile: Any | None = None) -> str:
     return (
         f"{_operator_prefix(operator_profile) if policy_mode == 'synthetic_operator' else _shared_system_prefix()} "
-        "Task 7 is quarterly headcount planning. Allocate visible hiring slots with budget_allocations, reason over delayed staffing effects, and use memory + belief_report to track changing priorities over time. "
+        "Task 7 is quarterly headcount planning. Allocate visible hiring slots with budget_allocations and reason over delayed staffing effects over time. "
+        "Headcount compounds slowly: in most quarters, back one primary staffing thesis and at most one enabling hire instead of spreading allocations across many programs. "
+        "Growth or revenue hires often underperform if support, reliability, or delivery capacity is already strained and no enabling support or infrastructure hire is in place. "
+        "Use the narrative, alerts, team state, and stakeholder notes to decide whether the company needs coverage, reliability, monetization support, or growth capacity right now. "
         "Do not exceed budget_remaining for the current quarter. Use integer allocations only. "
-        "Output schema: "
+        "memory_focus, memory_writes, and belief_report are optional diagnostics: omit them unless they are short and materially useful. "
+        "Do not include task_id. Omit optional fields you do not need. Prefer the minimal schema: "
         "{"
-        "\"task_id\":\"task7_quarterly_headcount_plan\","
-        "\"budget_allocations\":{\"hire_sre_cluster\":2},"
-        "\"rationale_summary\":\"one short sentence\","
-        "\"memory_focus\":[{\"entity_ids\":[\"team_infra\"],\"tags\":[\"team_update\"],\"lookback_steps\":3}],"
-        "\"memory_writes\":[{\"title\":\"note\",\"body\":\"short note\"}],"
-        "\"belief_report\":{\"archetype_probs\":{\"growth\":0.25,\"retention\":0.25,\"revenue\":0.25,\"efficiency\":0.25},\"shift_detected_confidence\":0.0}"
+        "\"allocations\":{\"hire_sre_cluster\":2}"
         "}."
     )
 
@@ -149,14 +150,12 @@ def _task5_system_prompt(policy_mode: str = "model", operator_profile: Any | Non
         "Avoid aggressive pricing or automation-heavy support when the visible evidence suggests enterprise trust is already fragile. "
         "Allowed messaging_action values: growth_push, retention_campaign, revenue_upsell, cost_comms, none. "
         "Allowed support_policy values: premium_sla, balanced_triage, automation_first, incident_swarm. "
-        "Output schema: "
+        "Do not include task_id or explanations. Output schema: "
         "{"
-        "\"task_id\":\"task5_crisis_response\","
-        "\"chosen_initiatives\":[\"...\"],"
-        "\"messaging_action\":\"retention_campaign\","
-        "\"pricing_change_pct\":0.0,"
-        "\"support_policy\":\"balanced_triage\","
-        "\"rationale\":\"one short sentence\""
+        "\"chosen\":[\"...\"],"
+        "\"msg\":\"retention_campaign\","
+        "\"price\":0.0,"
+        "\"support\":\"balanced_triage\""
         "}."
     )
 
@@ -178,6 +177,61 @@ def system_prompt(task_id: TaskId, policy_mode: str = "model", operator_profile:
     return _task5_system_prompt(policy_mode=policy_mode, operator_profile=operator_profile)
 
 
+def output_schema(task_id: TaskId) -> dict[str, Any]:
+    """Return a compact JSON schema for strict generation."""
+    if task_id == TaskId.TASK1:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string", "enum": [label.value for label in FeedbackLabel]},
+                },
+                "priorities": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "escalate_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["labels", "priorities", "escalate_ids"],
+        }
+    if task_id == TaskId.TASK2:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "selected": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["selected"],
+        }
+    if task_id in {TaskId.TASK3, TaskId.TASK5, TaskId.TASK6}:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "chosen": {"type": "array", "items": {"type": "string"}},
+                "msg": {"type": "string", "enum": [value.value for value in MessagingAction]},
+                "price": {"type": "number", "minimum": -0.2, "maximum": 0.2},
+                "support": {"type": "string", "enum": [value.value for value in SupportPolicy]},
+            },
+            "required": ["chosen", "msg", "price", "support"],
+        }
+    if task_id in {TaskId.TASK4, TaskId.TASK7}:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "allocations": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                }
+            },
+            "required": ["allocations"],
+        }
+    return {"type": "object", "additionalProperties": True}
+
+
 def _allowed_ids(observation: dict) -> list[str]:
     task_id = TaskId(observation["task_id"])
     if task_id == TaskId.TASK1:
@@ -188,63 +242,41 @@ def _allowed_ids(observation: dict) -> list[str]:
 def _json_template(task_id: TaskId) -> dict:
     if task_id == TaskId.TASK1:
         return {
-            "task_id": "task1_feedback_triage",
-            "labels": [{"item_id": "fb_1", "label": "bug"}],
-            "priorities": [{"item_id": "fb_1", "priority": 3}],
+            "labels": {"fb_1": "bug"},
+            "priorities": {"fb_1": 3},
             "escalate_ids": ["fb_1"],
         }
     if task_id == TaskId.TASK2:
         return {
-            "task_id": "task2_roadmap_priority",
-            "selected_item_ids": ["item_1"],
-            "rationale_summary": "Short rationale.",
+            "selected": ["item_1"],
         }
     if task_id == TaskId.TASK3:
         return {
-            "task_id": "task3_startup_week",
-            "chosen_initiatives": ["optimize_infra"],
-            "messaging_action": "cost_comms",
-            "pricing_change_pct": 0.0,
-            "support_policy": "automation_first",
-            "rationale": "Short rationale.",
-            "memory_focus": [{"entity_ids": ["acct_1"], "tags": ["retention"], "lookback_steps": 4}],
-            "memory_writes": [{"title": "note", "body": "Short note."}],
-            "belief_report": {"archetype_probs": {"growth": 0.25, "retention": 0.25, "revenue": 0.25, "efficiency": 0.25}, "shift_detected_confidence": 0.0},
+            "chosen": ["optimize_infra"],
+            "msg": "cost_comms",
+            "price": 0.0,
+            "support": "automation_first",
         }
     if task_id == TaskId.TASK4:
         return {
-            "task_id": "task4_capital_allocation",
-            "budget_allocations": {"renewal_rescue_pod": 3},
-            "rationale_summary": "Short rationale.",
+            "allocations": {"renewal_rescue_pod": 3},
         }
     if task_id == TaskId.TASK6:
         return {
-            "task_id": "task6_incident_response_week",
-            "chosen_initiatives": ["refactor_incident_tooling"],
-            "messaging_action": "retention_campaign",
-            "pricing_change_pct": 0.0,
-            "support_policy": "incident_swarm",
-            "rationale": "Short rationale.",
-            "memory_focus": [{"entity_ids": ["acct_1"], "tags": ["incident"], "lookback_steps": 4}],
-            "memory_writes": [{"title": "note", "body": "Short note."}],
-            "belief_report": {"archetype_probs": {"growth": 0.25, "retention": 0.25, "revenue": 0.25, "efficiency": 0.25}, "shift_detected_confidence": 0.0},
+            "chosen": ["refactor_incident_tooling"],
+            "msg": "retention_campaign",
+            "price": 0.0,
+            "support": "incident_swarm",
         }
     if task_id == TaskId.TASK7:
         return {
-            "task_id": "task7_quarterly_headcount_plan",
-            "budget_allocations": {"hire_sre_cluster": 2},
-            "rationale_summary": "Short rationale.",
-            "memory_focus": [{"entity_ids": ["team_infra"], "tags": ["team_update"], "lookback_steps": 3}],
-            "memory_writes": [{"title": "note", "body": "Short note."}],
-            "belief_report": {"archetype_probs": {"growth": 0.25, "retention": 0.25, "revenue": 0.25, "efficiency": 0.25}, "shift_detected_confidence": 0.0},
+            "allocations": {"hire_sre_cluster": 2},
         }
     return {
-        "task_id": "task5_crisis_response",
-        "chosen_initiatives": ["fix_login_bug"],
-        "messaging_action": "retention_campaign",
-        "pricing_change_pct": 0.0,
-        "support_policy": "balanced_triage",
-        "rationale": "Short rationale.",
+        "chosen": ["fix_login_bug"],
+        "msg": "retention_campaign",
+        "price": 0.0,
+        "support": "balanced_triage",
     }
 
 
@@ -738,6 +770,7 @@ def user_prompt(observation: dict, policy_mode: str = "model", operator_profile:
         "Use only IDs that appear in the observation.",
         "Keep the policy internally coherent with one inferred objective.",
         "If evidence is ambiguous, prefer the strongest non-contradictory signal from dashboard + notes + alerts.",
+        "Use the shortest valid JSON object that satisfies the compact schema and omit optional fields unless they matter.",
         "Return one JSON object only with no markdown fences.",
     ]
     if policy_mode == "synthetic_operator" and operator_profile is not None:
@@ -753,14 +786,14 @@ def user_prompt(observation: dict, policy_mode: str = "model", operator_profile:
         hints.append("If the narrative or alerts change sharply, consider that the hidden goal may have shifted.")
         hints.append("Use sim_date, calendar_events, decision_ledger, pending_effects, realized_effects, and visible initiative dependencies/conflicts to reason over delayed consequences.")
         hints.append("Use accounts, stakeholders, teams, market_context, and governance_constraints to understand who is affected and what is risky.")
-        hints.append("Use memory_workspace to recover older evidence, note conflicts, and decide what to retrieve next via memory_focus.")
-        hints.append("Emit belief_report each step so latent-goal and shift-tracking can be evaluated directly.")
+        hints.append("Use memory_workspace to recover older evidence, but keep the action payload short unless extra memory/belief fields clearly help.")
+        hints.append("belief_report is optional in strict mode; if you include it, keep it minimal.")
         hints.append("Only backlog initiative IDs are actionable. Inbox or calendar IDs are context, never valid chosen_initiatives.")
         hints.append("Prefer decisions whose delayed effects stay coherent with the same latent objective over the next few dates.")
     if task_id == TaskId.TASK6:
         hints.append("Respect budget_remaining and capacity_remaining.")
         hints.append("Use memory_workspace to track unresolved incident evidence and conflicting stakeholder claims.")
-        hints.append("Emit belief_report each step and use memory_writes for short durable notes.")
+        hints.append("Prefer a short valid control payload; omit focus, writes, and belief unless they materially help this step.")
         hints.append("Treat the incident as partially observed: false leads are possible and delayed effects matter.")
     if task_id == TaskId.TASK4:
         hints.append("Use integer budget points only and do not exceed sprint_budget.")
@@ -772,7 +805,7 @@ def user_prompt(observation: dict, policy_mode: str = "model", operator_profile:
         hints.append("Avoid policies that visibly clash with enterprise renewals, premium support obligations, or margin pressure.")
     if task_id == TaskId.TASK7:
         hints.append("Use integer budget_allocations only and do not exceed budget_remaining.")
-        hints.append("Track delayed staffing effects through memory_workspace and emit belief_report each quarter.")
+        hints.append("Track delayed staffing effects through memory_workspace, but keep the output minimal unless extra memory/belief fields are truly needed.")
         hints.append("Favor coherent hiring narratives over scattered one-off hires.")
 
     compact_observation = observation
@@ -809,4 +842,4 @@ def user_prompt(observation: dict, policy_mode: str = "model", operator_profile:
             "max_escalations": operator_profile.max_escalations,
             "max_abs_pricing_change": operator_profile.max_abs_pricing_change,
         }
-    return json.dumps(prompt_payload, indent=2, sort_keys=True)
+    return json.dumps(prompt_payload, sort_keys=True, separators=(",", ":"))

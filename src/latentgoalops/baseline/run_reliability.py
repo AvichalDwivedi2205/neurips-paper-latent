@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from latentgoalops.analysis.aggregate import load_episode_summaries
 from latentgoalops.analysis.stats import bootstrap_mean_ci
 from latentgoalops.baseline.run_baseline import (
+    BENCHMARK_RUNTIME_VERSION,
     DEFAULT_AGENT_MODEL,
     DEFAULT_PERSONA_MODEL,
     _parse_budget_cap_arg,
@@ -23,12 +24,21 @@ DEFAULT_BENCHMARK_MODELS = [
     DEFAULT_AGENT_MODEL,
     "openai-gpt-oss-120b",
 ]
+DEFAULT_OLLAMA_BENCHMARK_MODELS = [
+    "qwen3:8b",
+    "qwen3:14b",
+    "gemma3:12b",
+    "gpt-oss:20b",
+    "qwen3:30b",
+]
 
 
-def _parse_models(raw: str, policy: str, persona_model: str) -> list[str]:
+def _parse_models(raw: str, policy: str, persona_model: str, provider: str) -> list[str]:
     if raw == "default":
         if policy == "synthetic_operator":
             return [persona_model]
+        if provider == "ollama":
+            return DEFAULT_OLLAMA_BENCHMARK_MODELS
         return DEFAULT_BENCHMARK_MODELS
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -89,6 +99,13 @@ def main() -> None:
     parser.add_argument("--k-values", default="1,3,5")
     parser.add_argument("--budget-cap", type=_parse_budget_cap_arg, default=None)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--provider", choices=["auto", "openai_compat", "ollama"], default="openai_compat")
+    parser.add_argument("--api-base-url", default=None)
+    parser.add_argument("--ollama-host", default=None)
+    parser.add_argument("--ollama-num-ctx", type=int, default=None)
+    parser.add_argument("--ollama-keep-alive", default="15m")
+    parser.add_argument("--ollama-think", default="auto")
+    parser.add_argument("--paper-eval", action="store_true")
     parser.add_argument("--disable-hidden-shift", action="store_true")
     parser.add_argument("--disable-delayed-effects", action="store_true")
     parser.add_argument("--hide-decision-ledger", action="store_true")
@@ -103,7 +120,7 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv(".env")
-    models = _parse_models(args.models, args.policy, args.persona_model)
+    models = _parse_models(args.models, args.policy, args.persona_model, args.provider)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -123,6 +140,13 @@ def main() -> None:
                     run_id=f"{model.replace('/', '-')}-rep{repeat_index:02d}",
                     budget_cap=args.budget_cap,
                     temperature=args.temperature,
+                    provider=args.provider,
+                    api_base_url=args.api_base_url,
+                    ollama_host=args.ollama_host,
+                    ollama_num_ctx=args.ollama_num_ctx,
+                    ollama_keep_alive=args.ollama_keep_alive,
+                    ollama_think=args.ollama_think,
+                    paper_eval=args.paper_eval,
                     disable_hidden_shift=args.disable_hidden_shift,
                     disable_delayed_effects=args.disable_delayed_effects,
                     hide_decision_ledger=args.hide_decision_ledger,
@@ -149,7 +173,15 @@ def main() -> None:
         "repeats": args.repeats,
         "threshold": args.threshold,
         "temperature": args.temperature,
+        "provider": args.provider,
+        "api_base_url": args.api_base_url,
+        "ollama_host": args.ollama_host,
+        "ollama_num_ctx": args.ollama_num_ctx,
+        "ollama_keep_alive": args.ollama_keep_alive,
+        "ollama_think": args.ollama_think,
         "scenario_split": args.scenario_split,
+        "paper_eval": bool(args.paper_eval),
+        "benchmark_runtime_version": BENCHMARK_RUNTIME_VERSION,
         "k_values": ks,
         "results": _aggregate_reliability(episodes, args.threshold, ks),
     }

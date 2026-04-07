@@ -1,19 +1,24 @@
-"""OpenAI-compatible provider adapter with retry and checkpoint-friendly errors."""
+"""Provider adapters with retry and checkpoint-friendly errors."""
 
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass
+from typing import Any, Protocol
 
+import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 
 GRADIENT_BASE_URL = "https://inference.do-ai.run/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL_PRICING = {
     "openai-gpt-oss-20b": {"input": 0.05 / 1_000_000, "output": 0.45 / 1_000_000},
-    "openai-gpt-oss-120b": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
+    "openai-gpt-oss-120b": {"input": 0.10 / 1_000_000, "output": 0.70 / 1_000_000},
+    "kimi-k2.5": {"input": 0.50 / 1_000_000, "output": 2.70 / 1_000_000},
+    "glm-5": {"input": 1.00 / 1_000_000, "output": 3.20 / 1_000_000},
     "openai/gpt-oss-20b": {"input": 0.03 / 1_000_000, "output": 0.11 / 1_000_000},
     "openai/gpt-oss-120b": {"input": 0.09 / 1_000_000, "output": 0.35 / 1_000_000},
     "alibaba-qwen3-32b": {"input": 0.25 / 1_000_000, "output": 0.55 / 1_000_000},
@@ -21,7 +26,9 @@ DEFAULT_MODEL_PRICING = {
 }
 GRADIENT_MODEL_PRICING = {
     "openai-gpt-oss-20b": {"input": 0.05 / 1_000_000, "output": 0.45 / 1_000_000},
-    "openai-gpt-oss-120b": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
+    "openai-gpt-oss-120b": {"input": 0.10 / 1_000_000, "output": 0.70 / 1_000_000},
+    "kimi-k2.5": {"input": 0.50 / 1_000_000, "output": 2.70 / 1_000_000},
+    "glm-5": {"input": 1.00 / 1_000_000, "output": 3.20 / 1_000_000},
 }
 OPENROUTER_MODEL_PRICING = {
     "openai/gpt-oss-20b": {"input": 0.03 / 1_000_000, "output": 0.11 / 1_000_000},
@@ -35,12 +42,27 @@ GRADIENT_MODEL_ALIASES = {value: key for key, value in OPENROUTER_MODEL_ALIASES.
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 
 
+def _supports_reasoning_effort(request_model_name: str) -> bool:
+    """Return whether the provider should request server-side reasoning controls."""
+    return "gpt-oss" in request_model_name.lower()
+
+
+def _json_response_format_enabled() -> bool:
+    """Return whether the provider should request server-side JSON mode when possible."""
+    value = os.getenv("MODEL_JSON_RESPONSE_FORMAT", "on").strip().lower()
+    return value not in {"0", "false", "off", "disable", "disabled"}
+
+
 class ProviderExhaustedError(RuntimeError):
     """Raised when billing or account limits stop the run."""
 
 
 class ProviderCredentialError(RuntimeError):
     """Raised when the API token is invalid or revoked."""
+
+
+class ProviderTransientError(RuntimeError):
+    """Raised when a temporary provider failure should be resumed later."""
 
 
 @dataclass(slots=True)
@@ -51,21 +73,33 @@ class ProviderResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    finish_reason: str | None = None
     raw: dict | None = None
 
 
+class ChatProvider(Protocol):
+    """Minimal provider protocol used by the benchmark runner."""
+
+    model_name: str
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 700,
+        reasoning_effort: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+    ) -> ProviderResponse: ...
+
+
 def _is_gradient_endpoint(base_url: str) -> bool:
-    """Return whether the configured endpoint is the DO/Gradient-compatible host."""
     return "inference.do-ai.run" in base_url
 
 
 def _is_openrouter_endpoint(base_url: str) -> bool:
-    """Return whether the configured endpoint is the OpenRouter-compatible host."""
     return "openrouter.ai" in base_url
 
 
 def _default_provider_base_url() -> str:
-    """Resolve the implicit provider host when the user didn't set one explicitly."""
     return (
         os.getenv("API_BASE_URL")
         or os.getenv("OPENAI_BASE_URL")
@@ -74,8 +108,11 @@ def _default_provider_base_url() -> str:
     )
 
 
+def _default_ollama_host() -> str:
+    return os.getenv("OLLAMA_HOST") or OLLAMA_BASE_URL
+
+
 def _resolve_provider_token(base_url: str) -> tuple[str | None, str | None]:
-    """Resolve the most likely valid API token for one provider endpoint."""
     if _is_gradient_endpoint(base_url):
         candidates = [
             ("DIGITALOCEAN_API_TOKEN", os.getenv("DIGITALOCEAN_API_TOKEN")),
@@ -107,7 +144,6 @@ def _resolve_provider_token(base_url: str) -> tuple[str | None, str | None]:
 
 
 def _resolve_provider_model_name(model_name: str, base_url: str) -> str:
-    """Translate friendly model aliases into endpoint-specific provider IDs."""
     if _is_openrouter_endpoint(base_url):
         return OPENROUTER_MODEL_ALIASES.get(model_name, model_name)
     if _is_gradient_endpoint(base_url):
@@ -116,7 +152,6 @@ def _resolve_provider_model_name(model_name: str, base_url: str) -> str:
 
 
 def _resolve_model_pricing(model_name: str, request_model_name: str, base_url: str) -> dict[str, float]:
-    """Return endpoint-aware token pricing for budget accounting."""
     candidate_keys = [request_model_name, model_name]
     pricing_table = DEFAULT_MODEL_PRICING
     if _is_openrouter_endpoint(base_url):
@@ -130,51 +165,60 @@ def _resolve_model_pricing(model_name: str, request_model_name: str, base_url: s
 
 
 class GradientChatProvider:
-    """Small chat-completions wrapper for OpenAI-compatible endpoints."""
+    """Chat-completions wrapper for OpenAI-compatible endpoints."""
 
-    def __init__(self, model_name: str, max_retries: int = 6, temperature: float = 0.0) -> None:
+    def __init__(self, model_name: str, max_retries: int = 6, temperature: float = 0.0, base_url: str | None = None) -> None:
         self.model_name = model_name
         self.max_retries = max_retries
         self.temperature = temperature
         self.request_timeout_seconds = float(
             os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", str(DEFAULT_REQUEST_TIMEOUT_SECONDS))
         )
-        base_url = _default_provider_base_url()
-        token, token_source = _resolve_provider_token(base_url)
-        self.base_url = base_url
+        resolved_base_url = base_url or _default_provider_base_url()
+        token, token_source = _resolve_provider_token(resolved_base_url)
+        self.base_url = resolved_base_url
         self.token_source = token_source
-        self.request_model_name = _resolve_provider_model_name(model_name, base_url)
+        self.request_model_name = _resolve_provider_model_name(model_name, resolved_base_url)
         if not token:
             raise ValueError(
                 "Set HF_TOKEN (or DIGITALOCEAN_API_TOKEN / OPENAI_API_KEY / MODEL_ACCESS_KEY / OPENROUTER_API_KEY) "
                 "before running model baselines."
             )
-        # Keep retries in one place so provider-specific hangs degrade into a bounded retry loop.
-        self.client = OpenAI(base_url=base_url, api_key=token, timeout=self.request_timeout_seconds, max_retries=0)
+        self.client = OpenAI(base_url=resolved_base_url, api_key=token, timeout=self.request_timeout_seconds, max_retries=0)
 
-    def complete(self, messages: list[dict], max_tokens: int = 700) -> ProviderResponse:
-        """Run a chat completion with retry handling."""
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 700,
+        reasoning_effort: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
         last_error: Exception | None = None
+        response_format_enabled = _json_response_format_enabled()
         for attempt in range(self.max_retries):
             try:
-                request_kwargs = {
+                request_kwargs: dict[str, Any] = {
                     "model": self.request_model_name,
                     "messages": messages,
                     "temperature": self.temperature,
-                    "reasoning_effort": "low",
+                    "timeout": self.request_timeout_seconds,
                 }
+                if reasoning_effort is not None and _supports_reasoning_effort(self.request_model_name):
+                    request_kwargs["reasoning_effort"] = reasoning_effort
+                if response_format_enabled:
+                    request_kwargs["response_format"] = {"type": "json_object"}
                 if _is_openrouter_endpoint(self.base_url):
                     request_kwargs["max_tokens"] = max_tokens
                 else:
                     request_kwargs["max_completion_tokens"] = max_tokens
-                request_kwargs["timeout"] = self.request_timeout_seconds
                 response = self.client.chat.completions.create(**request_kwargs)
                 usage = response.usage
                 input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                 output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                 pricing = _resolve_model_pricing(self.model_name, self.request_model_name, self.base_url)
                 cost_usd = input_tokens * pricing["input"] + output_tokens * pricing["output"]
-                message = response.choices[0].message
+                choice = response.choices[0]
+                message = choice.message
                 content = message.content or "{}"
                 if isinstance(content, list):
                     content = "".join(
@@ -186,11 +230,17 @@ class GradientChatProvider:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cost_usd=cost_usd,
+                    finish_reason=getattr(choice, "finish_reason", None),
                     raw=response.model_dump(mode="json"),
                 )
             except APIStatusError as exc:
                 last_error = exc
                 message = str(exc).lower()
+                if exc.status_code == 400 and response_format_enabled and (
+                    "response_format" in message or "json_object" in message or "json schema" in message
+                ):
+                    response_format_enabled = False
+                    continue
                 if exc.status_code in (401, 403):
                     hint = ""
                     if (
@@ -217,8 +267,6 @@ class GradientChatProvider:
                             except ValueError:
                                 retry_after = 0.0
                     if exc.status_code == 429 and retry_after <= 0.0:
-                        # Serverless endpoints often omit Retry-After on burst limits.
-                        # Use a calmer backoff so long benchmark jobs can survive transient throttling.
                         retry_after = min(15.0 * (2**attempt), 120.0)
                     elif retry_after <= 0.0:
                         retry_after = min(2**attempt, 12)
@@ -229,4 +277,138 @@ class GradientChatProvider:
                 last_error = exc
                 time.sleep(min(2**attempt, 12))
                 continue
-        raise RuntimeError(f"Provider request failed after retries: {last_error}")
+        raise ProviderTransientError(f"Provider request failed after retries: {last_error}")
+
+
+class OllamaChatProvider:
+    """Native Ollama chat wrapper with schema-constrained JSON outputs."""
+
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        host: str | None = None,
+        max_retries: int = 4,
+        temperature: float = 0.0,
+        num_ctx: int | None = None,
+        keep_alive: str | None = None,
+        think: str = "auto",
+    ) -> None:
+        self.model_name = model_name
+        self.host = (host or _default_ollama_host()).rstrip("/")
+        self.max_retries = max_retries
+        self.temperature = temperature
+        self.num_ctx = num_ctx
+        self.keep_alive = keep_alive
+        self.think = think
+        self.request_timeout_seconds = float(
+            os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", str(DEFAULT_REQUEST_TIMEOUT_SECONDS))
+        )
+        self.client = httpx.Client(base_url=self.host, timeout=self.request_timeout_seconds)
+
+    def _resolve_think(self, reasoning_effort: str | None) -> bool | str | None:
+        mode = (self.think or "auto").strip().lower()
+        if mode in {"", "auto"}:
+            return False
+        if mode in {"on", "true"}:
+            return True
+        if mode in {"off", "false"}:
+            return False
+        if mode in {"low", "medium", "high"}:
+            return mode
+        if reasoning_effort is not None:
+            return reasoning_effort
+        return False
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 700,
+        reasoning_effort: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+    ) -> ProviderResponse:
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        if self.num_ctx is not None:
+            payload["options"]["num_ctx"] = int(self.num_ctx)
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
+        think = self._resolve_think(reasoning_effort)
+        if think is not None:
+            payload["think"] = think
+        if json_schema is not None:
+            payload["format"] = json_schema
+        elif _json_response_format_enabled():
+            payload["format"] = "json"
+
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                response = self.client.post("/api/chat", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                message = data.get("message", {}) or {}
+                content = message.get("content") or "{}"
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                return ProviderResponse(
+                    content=str(content),
+                    input_tokens=int(data.get("prompt_eval_count", 0) or 0),
+                    output_tokens=int(data.get("eval_count", 0) or 0),
+                    cost_usd=0.0,
+                    finish_reason=str(data.get("done_reason")) if data.get("done_reason") is not None else None,
+                    raw=data,
+                )
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                message = exc.response.text.lower()
+                if exc.response.status_code in {404, 400} and "model" in message and "not found" in message:
+                    raise ValueError(
+                        f"Ollama model '{self.model_name}' is not available on {self.host}. Pull it first with `ollama pull {self.model_name}`."
+                    ) from exc
+                if exc.response.status_code in {408, 429} or 500 <= exc.response.status_code < 600:
+                    time.sleep(min(2**attempt, 12))
+                    continue
+                raise
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as exc:
+                last_error = exc
+                time.sleep(min(2**attempt, 12))
+                continue
+        raise ProviderTransientError(f"Ollama request failed after retries: {last_error}")
+
+
+def create_chat_provider(
+    model_name: str,
+    *,
+    provider: str = "openai_compat",
+    temperature: float = 0.0,
+    base_url: str | None = None,
+    ollama_host: str | None = None,
+    ollama_num_ctx: int | None = None,
+    ollama_keep_alive: str | None = None,
+    ollama_think: str = "auto",
+) -> ChatProvider:
+    """Construct the configured provider backend."""
+    resolved_provider = provider
+    if resolved_provider == "auto":
+        resolved_provider = "ollama" if (ollama_host or os.getenv("OLLAMA_HOST")) else "openai_compat"
+    if resolved_provider == "ollama":
+        return OllamaChatProvider(
+            model_name,
+            host=ollama_host,
+            temperature=temperature,
+            num_ctx=ollama_num_ctx,
+            keep_alive=ollama_keep_alive,
+            think=ollama_think,
+        )
+    return GradientChatProvider(model_name, temperature=temperature, base_url=base_url)
